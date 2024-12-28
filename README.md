@@ -38,7 +38,6 @@ It can currently do the following
 Notably missing (and this is just the start of the list):
 
 - Import binding. And likely a pile of of "link" time features.
-- Growable memory.
 - Testing against anything other than "itoa". Will for _sure_ fail
   on anything but the simplest programs right now as it likely has a
   pile of bugs

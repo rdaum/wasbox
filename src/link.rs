@@ -17,7 +17,7 @@ use crate::exec::{exec_fragment, Fault, GlobalVar, Value};
 use crate::frame::Frame;
 use crate::module::Data;
 use crate::stack::Stack;
-use crate::{Module, ValueType};
+use crate::{Module, ValueType, VectorMemory};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -40,7 +40,7 @@ impl Error for LinkError {}
 
 pub struct Linked {
     pub module: Module,
-    pub memories: Vec<Vec<u8>>,
+    pub memories: Vec<VectorMemory>,
     pub globals: Vec<GlobalVar>,
     pub programs: Vec<Program>,
 }
@@ -80,10 +80,13 @@ pub fn link(module: Module) -> Result<Linked, LinkError> {
         .iter()
         .map(|m_decl| {
             let min_pages = m_decl.limits.0;
-            let _max_pages = m_decl.limits.1;
+            let max_pages = m_decl.limits.1;
             // We ignore the max_pages for now, we will need to get clever about using something
             // other than a vec, etc. to handle this.
-            vec![0; min_pages as usize * WASM_PAGE_SIZE]
+            VectorMemory::new(
+                min_pages as usize * WASM_PAGE_SIZE,
+                max_pages.map(|x| x as usize * WASM_PAGE_SIZE),
+            )
         })
         .collect();
 
@@ -104,7 +107,7 @@ pub fn link(module: Module) -> Result<Linked, LinkError> {
                 let data_offset = data_offset as usize;
                 // Read from program memory @ data offset into memory_vec
                 let data_len = data.1 - data.0;
-                memories[0][data_offset..data_offset + data_len]
+                memories[0].data_mut()[data_offset..data_offset + data_len]
                     .copy_from_slice(&module.module_data[data.0..data.1]);
             }
             Data::ActiveMemIdx { memidx, expr, data } => {
@@ -116,13 +119,14 @@ pub fn link(module: Module) -> Result<Linked, LinkError> {
                     panic!("Data segment offset must be i32");
                 };
                 let data_offset = data_offset as usize;
-                memories[*memidx as usize][data_offset..data_offset + data.1 - data.0]
+                memories[*memidx as usize].data_mut()[data_offset..data_offset + data.1 - data.0]
                     .copy_from_slice(&module.module_data[data.0..data.1]);
             }
             Data::Passive { data } => {
                 let offset = data.0;
                 let end = data.1;
-                memories[0][offset..end].copy_from_slice(&module.module_data[offset..end]);
+                memories[0].data_mut()[offset..end]
+                    .copy_from_slice(&module.module_data[offset..end]);
             }
         }
     }
