@@ -15,7 +15,7 @@
 use crate::decode::decode;
 use crate::frame::Frame;
 use crate::link::WASM_PAGE_SIZE;
-use crate::memory::Memory;
+use crate::memory::SliceMemory;
 use crate::module::Global;
 use crate::op::{MemArg, Op};
 use crate::stack::Stack;
@@ -57,6 +57,10 @@ pub enum Fault {
     LocalIndexOutOfBounds,
     /// Global variable index out of bounds
     GlobalIndexOutOfBounds,
+    /// Memory access out of bounds
+    MemoryOutOfBounds,
+    /// Memory growth not supported for this memory type, or memory is at maximum size
+    CannotGrowMemory,
 }
 
 impl Display for Fault {
@@ -68,6 +72,8 @@ impl Display for Fault {
             Fault::ControlStackUnderflow => write!(f, "Control stack underflow"),
             Fault::LocalIndexOutOfBounds => write!(f, "Local index out of bounds"),
             Fault::GlobalIndexOutOfBounds => write!(f, "Global index out of bounds"),
+            Fault::MemoryOutOfBounds => write!(f, "Memory out of bounds"),
+            Fault::CannotGrowMemory => write!(f, "Cannot grow memory"),
         }
     }
 }
@@ -76,7 +82,7 @@ impl Error for Fault {}
 
 pub fn execute<'a>(
     frame: &mut Frame,
-    memory: &'a mut Memory<'a>,
+    memory: &'a mut SliceMemory<'a>,
     globals: &mut [GlobalVar],
     num_ticks: usize,
 ) -> Result<Continuation, Fault> {
@@ -209,124 +215,124 @@ pub fn execute<'a>(
             }
             Op::LoadI32(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_i32(addr);
+                let value = memory.get_i32(addr)?;
                 frame.stack.push_i32(value);
             }
             Op::LoadI64(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_i64(addr);
+                let value = memory.get_i64(addr)?;
                 frame.stack.push_i64(value);
             }
             Op::LoadF32(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_f32(addr);
+                let value = memory.get_f32(addr)?;
                 frame.stack.push_u32(value.to_bits());
             }
             Op::LoadF64(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_f64(addr);
+                let value = memory.get_f64(addr)?;
                 frame.stack.push_u64(value.to_bits());
             }
 
             // Extending load, signed
             Op::Load8SE(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_u8(addr) as i8 as i32;
+                let value = memory.get_u8(addr)? as i8 as i32;
                 frame.stack.push_i32(value);
             }
             Op::Load16Se(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_u16(addr) as i16 as i32;
+                let value = memory.get_u16(addr)? as i16 as i32;
                 frame.stack.push_i32(value);
             }
             Op::Load8I64Se(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_u8(addr) as i8 as i64;
+                let value = memory.get_u8(addr)? as i8 as i64;
                 frame.stack.push_i64(value);
             }
             Op::Load16I64Se(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_u16(addr) as i16 as i64;
+                let value = memory.get_u16(addr)? as i16 as i64;
                 frame.stack.push_i64(value);
             }
             Op::Load32I64Se(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_u32(addr) as i32 as i64;
+                let value = memory.get_u32(addr)? as i32 as i64;
                 frame.stack.push_i64(value);
             }
 
             // Extending load, unsigned
             Op::Load8Ze(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_u8(addr) as u32;
+                let value = memory.get_u8(addr)? as u32;
                 frame.stack.push_u32(value);
             }
             Op::Load16Ze(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_u16(addr) as u32;
+                let value = memory.get_u16(addr)? as u32;
                 frame.stack.push_u32(value);
             }
             Op::Load8I64Ze(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_u8(addr) as u64;
+                let value = memory.get_u8(addr)? as u64;
                 frame.stack.push_u64(value);
             }
             Op::Load16I64Ze(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_u16(addr) as u64;
+                let value = memory.get_u16(addr)? as u64;
                 frame.stack.push_u64(value);
             }
             Op::Load32I64Ze(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                let value = memory.get_u32(addr) as u64;
+                let value = memory.get_u32(addr)? as u64;
                 frame.stack.push_u64(value);
             }
             Op::StoreI32(addr) => {
                 let value = frame.stack.pop_i32()?;
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                memory.set_i32(addr, value);
+                memory.set_i32(addr, value)?;
             }
             Op::StoreI64(addr) => {
                 let value = frame.stack.pop_i64()?;
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                memory.set_i64(addr, value);
+                memory.set_i64(addr, value)?;
             }
             Op::StoreF32(addr) => {
                 let value = frame.stack.pop_f32()?;
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                memory.set_f32(addr, value);
+                memory.set_f32(addr, value)?;
             }
             Op::StoreF64(addr) => {
                 let value = frame.stack.pop_f64()?;
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                memory.set_f64(addr, value);
+                memory.set_f64(addr, value)?;
             }
 
             // Silently narrow the width of the value
             Op::Store8_32(addr) => {
                 let value = frame.stack.pop_i32()? as u8;
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                memory.set_u8(addr, value);
+                memory.set_u8(addr, value)?;
             }
             Op::Store16_32(addr) => {
                 let value = frame.stack.pop_i32()? as u16;
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                memory.set_u16(addr, value);
+                memory.set_u16(addr, value)?;
             }
             Op::Store8_64(addr) => {
                 let value = frame.stack.pop_i64()? as u8;
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                memory.set_u8(addr, value);
+                memory.set_u8(addr, value)?;
             }
             Op::Store16_64(addr) => {
                 let value = frame.stack.pop_i64()? as u16;
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                memory.set_u16(addr, value);
+                memory.set_u16(addr, value)?;
             }
             Op::Store32_64(addr) => {
                 let value = frame.stack.pop_i64()? as u32;
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
-                memory.set_u32(addr, value);
+                memory.set_u32(addr, value)?;
             }
 
             Op::I32Const(v) => {
@@ -346,7 +352,12 @@ pub fn execute<'a>(
                 frame.stack.push_u32(size as u32);
             }
             Op::MemoryGrow => {
-                panic!("MemoryGrow not implemented");
+                let delta = frame.stack.pop_i32()?;
+                if delta < 0 {
+                    return Err(Fault::CannotGrowMemory);
+                }
+                let old_size = memory.grow(delta as usize)?;
+                frame.stack.push_i32(old_size as i32);
             }
             Op::I32Eqz => {
                 let value = frame.stack.pop_i32()?;
@@ -983,7 +994,7 @@ pub(crate) fn exec_fragment(program: &[u8], return_type: ValueType) -> Result<Va
     // TODO: I don't actually know what a reasonable amount of memory is, so we'll just default
     //   to one page.
     let mut const_prg_memory_vec = vec![0; WASM_PAGE_SIZE];
-    let mut const_prg_memory = Memory::new(&mut const_prg_memory_vec);
+    let mut const_prg_memory = SliceMemory::new(&mut const_prg_memory_vec);
     let mut const_prg_globals = vec![];
 
     // In this case the expectation is we run out of instructions, and the stack contains the return
@@ -1007,7 +1018,7 @@ pub(crate) fn exec_fragment(program: &[u8], return_type: ValueType) -> Result<Va
 mod tests {
     use crate::exec::{execute, Value};
     use crate::link::link;
-    use crate::memory::Memory;
+    use crate::memory::SliceMemory;
     use crate::module::Module;
 
     #[test]
@@ -1022,7 +1033,7 @@ mod tests {
             .frame_for_funcname("itoa", &[Value::I32(123)])
             .unwrap();
 
-        let mut memory = Memory::new(&mut memory_vec);
+        let mut memory = SliceMemory::new(&mut memory_vec);
         execute(&mut frame, &mut memory, &mut globals, 10000).unwrap();
 
         // Stack should be empty after execution.
