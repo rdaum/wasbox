@@ -15,6 +15,7 @@
 use crate::decode::decode;
 use crate::frame::Frame;
 use crate::link::WASM_PAGE_SIZE;
+use crate::memory::Memory;
 use crate::memory::SliceMemory;
 use crate::module::Global;
 use crate::op::{MemArg, Op};
@@ -80,12 +81,15 @@ impl Display for Fault {
 
 impl Error for Fault {}
 
-pub fn execute<'a>(
+pub fn execute<'a, M>(
     frame: &mut Frame,
-    memory: &'a mut SliceMemory<'a>,
+    memory: &'a mut M,
     globals: &mut [GlobalVar],
     num_ticks: usize,
-) -> Result<Continuation, Fault> {
+) -> Result<Continuation, Fault>
+where
+    M: Memory,
+{
     let mut ticks_used = 0;
     loop {
         // Pull next opcode from the program
@@ -1018,8 +1022,8 @@ pub(crate) fn exec_fragment(program: &[u8], return_type: ValueType) -> Result<Va
 mod tests {
     use crate::exec::{execute, Value};
     use crate::link::link;
-    use crate::memory::SliceMemory;
     use crate::module::Module;
+    use crate::Memory;
 
     #[test]
     fn load_run_itoa() {
@@ -1027,19 +1031,18 @@ mod tests {
         let module = Module::load(&module_data).unwrap();
 
         let linked = link(module).unwrap();
-        let mut memory_vec = linked.memories[0].clone();
+        let mut memory = linked.memories[0].clone();
         let mut globals = linked.globals.clone();
         let mut frame = linked
             .frame_for_funcname("itoa", &[Value::I32(123)])
             .unwrap();
 
-        let mut memory = SliceMemory::new(&mut memory_vec);
         execute(&mut frame, &mut memory, &mut globals, 10000).unwrap();
 
         // Stack should be empty after execution.
         assert_eq!(frame.stack.width(), 0);
         // Check that the memory contains the expected string.
         let expected = [49, 50, 51, 0];
-        assert_eq!(expected, memory_vec[8010..8014]);
+        assert_eq!(expected, memory.data()[8010..8014]);
     }
 }

@@ -14,33 +14,27 @@
 
 use crate::exec::Fault;
 
-pub struct SliceMemory<'a> {
-    data: &'a mut [u8],
-}
-impl<'a> SliceMemory<'a> {
-    pub fn new(data: &'a mut [u8]) -> Self {
-        SliceMemory { data }
-    }
-    pub fn data(&self) -> &[u8] {
-        self.data
-    }
+pub use slice_mem::SliceMemory;
+pub use vector_mem::VectorMemory;
 
-    pub fn size(&self) -> usize {
-        self.data.len()
-    }
+mod slice_mem;
+mod vector_mem;
 
-    pub fn grow(&mut self, _new_size: usize) -> Result<usize, Fault> {
-        Err(Fault::CannotGrowMemory)
-    }
+// TODO: MmapMemory, both file and anonymous
 
-    pub fn get_u8(&self, offset: usize) -> Result<u8, Fault> {
+pub trait Memory {
+    fn data(&self) -> &[u8];
+    fn data_mut(&mut self) -> &mut [u8];
+
+    fn size(&self) -> usize;
+    fn grow(&mut self, _new_size: usize) -> Result<usize, Fault>;
+    fn get_u8(&self, offset: usize) -> Result<u8, Fault> {
         if offset >= self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         Ok(self.data()[offset])
     }
-
-    pub fn get_u16(&self, offset: usize) -> Result<u16, Fault> {
+    fn get_u16(&self, offset: usize) -> Result<u16, Fault> {
         if offset + 2 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -49,8 +43,7 @@ impl<'a> SliceMemory<'a> {
             self.data()[offset + 1],
         ]))
     }
-
-    pub fn get_i32(&self, offset: usize) -> Result<i32, Fault> {
+    fn get_i32(&self, offset: usize) -> Result<i32, Fault> {
         if offset + 4 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -61,8 +54,7 @@ impl<'a> SliceMemory<'a> {
             self.data()[offset + 3],
         ]))
     }
-
-    pub fn get_i64(&self, offset: usize) -> Result<i64, Fault> {
+    fn get_i64(&self, offset: usize) -> Result<i64, Fault> {
         if offset + 8 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -77,8 +69,7 @@ impl<'a> SliceMemory<'a> {
             self.data()[offset + 7],
         ]))
     }
-
-    pub fn get_u32(&self, offset: usize) -> Result<u32, Fault> {
+    fn get_u32(&self, offset: usize) -> Result<u32, Fault> {
         if offset + 4 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -89,8 +80,7 @@ impl<'a> SliceMemory<'a> {
             self.data()[offset + 3],
         ]))
     }
-
-    pub fn get_u64(&self, offset: usize) -> Result<u64, Fault> {
+    fn get_u64(&self, offset: usize) -> Result<u64, Fault> {
         if offset + 8 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -105,8 +95,7 @@ impl<'a> SliceMemory<'a> {
             self.data()[offset + 7],
         ]))
     }
-
-    pub fn get_f32(&self, offset: usize) -> Result<f32, Fault> {
+    fn get_f32(&self, offset: usize) -> Result<f32, Fault> {
         if offset + 4 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -117,8 +106,7 @@ impl<'a> SliceMemory<'a> {
             self.data()[offset + 3],
         ]))
     }
-
-    pub fn get_f64(&self, offset: usize) -> Result<f64, Fault> {
+    fn get_f64(&self, offset: usize) -> Result<f64, Fault> {
         if offset + 8 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -133,20 +121,14 @@ impl<'a> SliceMemory<'a> {
             self.data()[offset + 7],
         ]))
     }
-
-    pub fn data_mut(&mut self) -> &mut [u8] {
-        self.data
-    }
-
-    pub fn set_u8(&mut self, offset: usize, value: u8) -> Result<(), Fault> {
+    fn set_u8(&mut self, offset: usize, value: u8) -> Result<(), Fault> {
         if offset >= self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         self.data_mut()[offset] = value;
         Ok(())
     }
-
-    pub fn set_u16(&mut self, offset: usize, value: u16) -> Result<(), Fault> {
+    fn set_u16(&mut self, offset: usize, value: u16) -> Result<(), Fault> {
         if offset + 2 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -155,8 +137,7 @@ impl<'a> SliceMemory<'a> {
         self.data_mut()[offset + 1] = le[1];
         Ok(())
     }
-
-    pub fn set_i32(&mut self, offset: usize, value: i32) -> Result<(), Fault> {
+    fn set_i32(&mut self, offset: usize, value: i32) -> Result<(), Fault> {
         if offset + 4 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -167,8 +148,7 @@ impl<'a> SliceMemory<'a> {
         self.data_mut()[offset + 3] = le[3];
         Ok(())
     }
-
-    pub fn set_i64(&mut self, offset: usize, value: i64) -> Result<(), Fault> {
+    fn set_i64(&mut self, offset: usize, value: i64) -> Result<(), Fault> {
         if offset + 8 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -183,8 +163,7 @@ impl<'a> SliceMemory<'a> {
         self.data_mut()[offset + 7] = le[7];
         Ok(())
     }
-
-    pub fn set_u32(&mut self, offset: usize, value: u32) -> Result<(), Fault> {
+    fn set_u32(&mut self, offset: usize, value: u32) -> Result<(), Fault> {
         if offset + 4 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -195,8 +174,7 @@ impl<'a> SliceMemory<'a> {
         self.data_mut()[offset + 3] = le[3];
         Ok(())
     }
-
-    pub fn set_u64(&mut self, offset: usize, value: u64) -> Result<(), Fault> {
+    fn set_u64(&mut self, offset: usize, value: u64) -> Result<(), Fault> {
         if offset + 8 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -211,8 +189,7 @@ impl<'a> SliceMemory<'a> {
         self.data_mut()[offset + 7] = le[7];
         Ok(())
     }
-
-    pub fn set_f32(&mut self, offset: usize, value: f32) -> Result<(), Fault> {
+    fn set_f32(&mut self, offset: usize, value: f32) -> Result<(), Fault> {
         if offset + 4 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
@@ -223,8 +200,7 @@ impl<'a> SliceMemory<'a> {
         self.data_mut()[offset + 3] = le[3];
         Ok(())
     }
-
-    pub fn set_f64(&mut self, offset: usize, value: f64) -> Result<(), Fault> {
+    fn set_f64(&mut self, offset: usize, value: f64) -> Result<(), Fault> {
         if offset + 8 > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }

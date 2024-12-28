@@ -39,7 +39,7 @@ pub use crate::decode::DecodeError;
 use crate::module::LEB128Reader;
 pub use frame::Frame;
 pub use link::{link, Linked};
-pub use memory::SliceMemory;
+pub use memory::{Memory, SliceMemory, VectorMemory};
 pub use module::{
     Code, Data, ElementMode, ElementSegment, Elements, Global, ImportExportKind, LoaderError,
     MemorySection, Module, ReferenceType, SectionInfo,
