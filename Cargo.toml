@@ -1,0 +1,12 @@
+[package]
+name = "wasbox"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+wast = "222.0.0"
+
+[dependencies]
+strum = "0.26.3"
+strum_macros = "0.26.4"
+varint-rs = "2.2.0"
