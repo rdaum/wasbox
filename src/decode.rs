@@ -24,6 +24,7 @@ pub struct Program {
     pub ops: Vec<Op>,
     pub labels: Labels,
     pub local_types: Vec<ValueType>,
+    pub return_types: Vec<ValueType>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -138,6 +139,7 @@ impl Program {
             ops: vec![],
             labels: Labels { labels: vec![] },
             local_types: vec![],
+            return_types: vec![],
         }
     }
 
@@ -171,7 +173,7 @@ impl Labels {
     fn mk_program(&mut self) -> Scope {
         let label = self.new_bound_label(0);
         Scope {
-            scope_type: ScopeType::Block,
+            scope_type: ScopeType::Program,
             signature: ValueType::Unit,
             label,
         }

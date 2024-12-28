@@ -28,7 +28,7 @@
 mod decode;
 mod exec;
 mod frame;
-mod link;
+mod instance;
 mod memory;
 mod module;
 mod op;
@@ -37,8 +37,9 @@ mod stack;
 
 pub use crate::decode::DecodeError;
 use crate::module::LEB128Reader;
+pub use exec::{ExecError, Execution};
 pub use frame::Frame;
-pub use link::{link, Linked};
+pub use instance::{mk_instance, Instance};
 pub use memory::{Memory, SliceMemory, VectorMemory};
 pub use module::{
     Code, Data, ElementMode, ElementSegment, Elements, Global, ImportExportKind, LoaderError,

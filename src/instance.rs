@@ -26,25 +26,37 @@ pub const WASM_PAGE_SIZE: usize = 1 << 16;
 #[derive(Debug)]
 pub enum LinkError {
     ActiveExpressionError(Fault),
+    FunctionNotFound,
+    UnsupportedFeature(String),
+    ArgumentTypeMismatch(usize, ValueType, ValueType),
 }
 
 impl Display for LinkError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             LinkError::ActiveExpressionError(e) => write!(f, "Active expression error: {}", e),
+            LinkError::FunctionNotFound => write!(f, "Function not found"),
+            LinkError::UnsupportedFeature(s) => write!(f, "Unsupported feature: {}", s),
+            LinkError::ArgumentTypeMismatch(idx, expected, actual) => write!(
+                f,
+                "Argument type mismatch at index {}: expected {:?}, got {:?}",
+                idx, expected, actual
+            ),
         }
     }
 }
 
 impl Error for LinkError {}
 
-pub struct Linked {
+pub struct Instance {
     pub module: Module,
     pub memories: Vec<VectorMemory>,
     pub globals: Vec<GlobalVar>,
     pub programs: Vec<Program>,
 }
-pub fn link(module: Module) -> Result<Linked, LinkError> {
+
+/// Produce an instance from a module.
+pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
     let mut programs = Vec::with_capacity(module.code.len());
 
     // The funcidx in types etc here is relative to both imports and local functions, so we have to
@@ -70,7 +82,9 @@ pub fn link(module: Module) -> Result<Linked, LinkError> {
         for local_type in &module.code[i].locals {
             local_types.push(*local_type);
         }
+
         program.local_types = local_types;
+        program.return_types = module.types[funcidx].results.clone();
 
         programs.push(program);
     }
@@ -144,7 +158,7 @@ pub fn link(module: Module) -> Result<Linked, LinkError> {
         });
     }
 
-    Ok(Linked {
+    Ok(Instance {
         module,
         memories,
         globals,
@@ -152,8 +166,8 @@ pub fn link(module: Module) -> Result<Linked, LinkError> {
     })
 }
 
-impl Linked {
-    pub fn frame_for_funcidx(&self, index: u32, args: &[Value]) -> Frame {
+impl Instance {
+    pub fn frame_for_funcidx(&self, index: u32, args: &[Value]) -> Result<Frame, LinkError> {
         // Funcidx must consider also the imports, it isn't just an offset into `code` section.
         // So to find the function index, scan imports first
         // Then scan functions/code.
@@ -166,50 +180,59 @@ impl Linked {
                 crate::module::Import::Func(idx) => {
                     num_imported_funcs += 1;
                     if *idx == index {
-                        panic!("Imported functions not yet supported");
+                        return Err(LinkError::UnsupportedFeature(
+                            "Imported functions not supported yet".to_string(),
+                        ));
                     }
                 }
                 _ => continue,
             }
         }
         // Types of arguments must match the function signature
-        self.module.types[index as usize]
+        for (i, (expected, actual)) in self.module.types[index as usize]
             .params
             .iter()
             .zip(args.iter())
-            .for_each(|(expected, actual)| {
-                if *expected != actual.type_of() {
-                    panic!("Argument type mismatch");
-                }
-            });
+            .enumerate()
+        {
+            if *expected != actual.type_of() {
+                return Err(LinkError::ArgumentTypeMismatch(
+                    i,
+                    *expected,
+                    actual.type_of(),
+                ));
+            }
+        }
         let index = (index - num_imported_funcs) as usize;
         if index >= self.programs.len() {
-            panic!("Function index out of bounds");
+            return Err(LinkError::FunctionNotFound);
         }
         let program = &self.programs[index];
         let num_locals = program.local_types.len();
         let mut locals = args.to_vec();
         locals.extend_from_slice(&vec![Value::Unit; num_locals - args.len()]);
-        Frame {
+        let return_types = program.return_types.clone();
+        Ok(Frame {
             locals,
+            return_types,
             program: program.clone(),
             stack: Stack::new(),
             pc: 0,
             control_stack: vec![],
-        }
+        })
     }
 
-    pub fn frame_for_funcname(&self, name: &str, args: &[Value]) -> Option<Frame> {
+    pub fn frame_for_funcname(&self, name: &str, args: &[Value]) -> Result<Frame, LinkError> {
         for export in &self.module.exports {
             if export.name == name {
                 match export.kind {
                     crate::module::ImportExportKind::Function => {
-                        return Some(self.frame_for_funcidx(export.index, args));
+                        return self.frame_for_funcidx(export.index, args);
                     }
                     _ => continue,
                 }
             }
         }
-        None
+        Err(LinkError::FunctionNotFound)
     }
 }

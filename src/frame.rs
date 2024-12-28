@@ -19,6 +19,7 @@ use crate::ValueType;
 
 pub struct Frame {
     pub locals: Vec<Value>,
+    pub return_types: Vec<ValueType>,
     pub program: Program,
     pub stack: Stack,
     pub pc: usize,
@@ -34,12 +35,14 @@ pub struct Control {
 
 impl Frame {
     pub fn new(num_locals: usize, program: Program) -> Self {
+        let return_types = program.return_types.clone();
         Frame {
             locals: vec![Value::Unit; num_locals],
             stack: Stack::new(),
             pc: 0,
             program,
             control_stack: vec![],
+            return_types,
         }
     }
 
@@ -52,13 +55,18 @@ impl Frame {
         });
     }
 
-    pub fn pop_control(&mut self) -> Result<Control, Fault> {
+    pub fn pop_control(&mut self) -> Result<(Control, Option<Value>), Fault> {
         let c = self
             .control_stack
             .pop()
             .ok_or(Fault::ControlStackUnderflow)?;
         self.stack.shrink_to(c.stack_width);
-        Ok(c)
+        if c.signature != ValueType::Unit {
+            let value = Value::pop_from(c.signature, &mut self.stack)?;
+            Ok((c, Some(value)))
+        } else {
+            Ok((c, None))
+        }
     }
 
     pub fn jump_label(&mut self, label_id: LabelId) -> bool {
@@ -88,9 +96,9 @@ impl Frame {
         let type_of_local = self.program.local_types[local_index as usize];
 
         let value = if pop {
-            Value::pop_to(type_of_local, &mut self.stack)?
+            Value::pop_from(type_of_local, &mut self.stack)?
         } else {
-            Value::top_to(type_of_local, &mut self.stack)?
+            Value::top_of(type_of_local, &mut self.stack)?
         };
         self.locals[local_index as usize] = value;
         Ok(())

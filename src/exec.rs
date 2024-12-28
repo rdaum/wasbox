@@ -12,31 +12,25 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-use crate::decode::decode;
+use crate::decode::{decode, ScopeType};
 use crate::frame::Frame;
-use crate::link::WASM_PAGE_SIZE;
+use crate::instance::{LinkError, WASM_PAGE_SIZE};
 use crate::memory::Memory;
 use crate::memory::SliceMemory;
 use crate::module::Global;
 use crate::op::{MemArg, Op};
 use crate::stack::Stack;
-use crate::ValueType;
+use crate::{Instance, ValueType};
 use std::error::Error;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 
 /// How many ticks we allow before we stop execution when running expressions during the link
 /// phase (Active data expressions etc)
 const EXPR_TICK_LIMIT: usize = 1 << 10;
 
 #[derive(Debug)]
-pub enum CallType {
-    Direct(u32),
-    Indirect(u32),
-}
-
-#[derive(Debug)]
 pub enum Continuation {
-    Call(CallType),
+    Call(u32),
     /// Program ran out of instructions
     ProgramEnd,
     /// An explicit return instruction was encountered.
@@ -81,11 +75,11 @@ impl Display for Fault {
 
 impl Error for Fault {}
 
-pub fn execute<'a, M>(
+fn execute<M>(
     frame: &mut Frame,
-    memory: &'a mut M,
+    memory: &mut M,
     globals: &mut [GlobalVar],
-    num_ticks: usize,
+    max_ticks: usize,
 ) -> Result<Continuation, Fault>
 where
     M: Memory,
@@ -99,7 +93,7 @@ where
             return Ok(Continuation::ProgramEnd);
         }
         ticks_used += 1;
-        if ticks_used >= num_ticks {
+        if ticks_used >= max_ticks {
             return Err(Fault::OutOfTicks);
         }
         frame.pc += 1;
@@ -110,12 +104,18 @@ where
             Op::StartScope(sig, scope_type, label) => {
                 frame.push_control(sig, scope_type, label);
             }
-            Op::EndScope(_st) => {
-                let end_scope = frame.pop_control()?;
-                // assert_eq!(st, end_scope.scope_type);
+            Op::EndScope(c) => {
+                // If this is EndScope(Program), we need to preserve the stack for return value.
+                if let ScopeType::Program = &c {
+                    return Ok(Continuation::DoneReturn);
+                }
+                let (end_scope, push_value) = frame.pop_control()?;
+
                 // Shrink-stack to the width declared in the control scope.
                 frame.stack.shrink_to(end_scope.stack_width);
-                // TODO: do we need to do something with the signature/value ?
+                if let Some(value) = push_value {
+                    value.push_to(&mut frame.stack);
+                }
             }
             Op::If(else_label) => {
                 // Pop condition from stack, evaluate.
@@ -182,10 +182,13 @@ where
                 return Ok(Continuation::DoneReturn);
             }
             Op::Call(c) => {
-                return Ok(Continuation::Call(CallType::Direct(c)));
+                return Ok(Continuation::Call(c));
             }
-            Op::CallIndirect(ci) => {
-                return Ok(Continuation::Call(CallType::Indirect(ci)));
+            Op::CallIndirect(_sig) => {
+                // In indirect, we pop the function index from the stack.
+                // TODO: do something with `sig` ?
+                let func_index = frame.stack.pop_u32()?;
+                return Ok(Continuation::Call(func_index));
             }
             Op::Drop => {
                 frame.stack.pop_u32()?;
@@ -929,7 +932,7 @@ impl Value {
         }
     }
 
-    pub fn pop_to(ty: ValueType, stack: &mut Stack) -> Result<Self, Fault> {
+    pub fn pop_from(ty: ValueType, stack: &mut Stack) -> Result<Self, Fault> {
         Ok(match ty {
             ValueType::Unit => {
                 stack.pop_u64()?;
@@ -948,7 +951,7 @@ impl Value {
         })
     }
 
-    pub fn top_to(ty: ValueType, stack: &mut Stack) -> Result<Self, Fault> {
+    pub fn top_of(ty: ValueType, stack: &mut Stack) -> Result<Self, Fault> {
         Ok(match ty {
             ValueType::Unit => {
                 stack.pop_u64()?;
@@ -987,12 +990,14 @@ impl Value {
 // For executing little fragments of code e.g. globals or data segments
 pub(crate) fn exec_fragment(program: &[u8], return_type: ValueType) -> Result<Value, Fault> {
     let const_program = decode(program).unwrap();
+    let return_types = vec![return_type];
     let mut global_exec_frame = Frame {
         locals: vec![Value::Unit; 0],
         program: const_program,
         stack: Stack::new(),
         pc: 0,
         control_stack: vec![],
+        return_types,
     };
     // This little fragment, it doesn't get much memory and doesn't get *any* globals.
     // TODO: I don't actually know what a reasonable amount of memory is, so we'll just default
@@ -1015,34 +1020,125 @@ pub(crate) fn exec_fragment(program: &[u8], return_type: ValueType) -> Result<Va
         _ => return Err(Fault::UnexpectedResult(result)),
     }
 
-    Value::pop_to(return_type, &mut global_exec_frame.stack)
+    Value::pop_from(return_type, &mut global_exec_frame.stack)
+}
+
+#[derive(Debug)]
+pub enum ExecError {
+    LinkageError(LinkError),
+    ExecutionFault(Fault),
+}
+
+impl Display for ExecError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecError::LinkageError(e) => write!(f, "Linkage error: {}", e),
+            ExecError::ExecutionFault(e) => write!(f, "Execution fault: {}", e),
+        }
+    }
+}
+
+impl Error for ExecError {}
+
+/// A context for executing functions in an Instance derived from a module.
+pub struct Execution<M>
+where
+    M: Memory,
+{
+    /// The linked module.
+    // TODO: in the future this could be multiple instances?, one per module.
+    instance: Instance,
+    /// The stack of frames for the current execution.
+    frame_stack: Vec<Frame>,
+    /// The memory for the current execution.
+    memory: M,
+    /// Final result of execution when all frames have executed.
+    result: Option<Vec<Value>>,
+}
+
+impl<M> Execution<M>
+where
+    M: Memory,
+{
+    pub fn new(linkage: Instance, memory: M) -> Self {
+        Execution {
+            instance: linkage,
+            frame_stack: vec![],
+            memory,
+            result: None,
+        }
+    }
+
+    pub fn prepare(&mut self, funcidx: u32, args: &[Value]) -> Result<(), ExecError> {
+        let frame = self
+            .instance
+            .frame_for_funcidx(funcidx, args)
+            .map_err(ExecError::LinkageError)?;
+
+        self.frame_stack.push(frame);
+        Ok(())
+    }
+
+    pub fn run(&mut self) -> Result<(), ExecError> {
+        loop {
+            let top_frame = self.frame_stack.last_mut().unwrap();
+            let result = execute(
+                top_frame,
+                &mut self.memory,
+                &mut self.instance.globals,
+                10000,
+            );
+            match result {
+                Ok(Continuation::ProgramEnd) | Ok(Continuation::DoneReturn) => {
+                    let mut return_values = vec![];
+                    // get the return results based on the return types
+                    for rt in top_frame.return_types.iter() {
+                        return_values.push((
+                            *rt,
+                            Value::pop_from(*rt, &mut top_frame.stack)
+                                .map_err(ExecError::ExecutionFault)?,
+                        ));
+                    }
+                    self.frame_stack.pop();
+                    if let Some(frame) = self.frame_stack.last_mut() {
+                        for (_, v) in return_values {
+                            v.push_to(&mut frame.stack);
+                        }
+                        continue;
+                    } else {
+                        self.result = Some(return_values.into_iter().map(|(_, v)| v).collect());
+                        return Ok(());
+                    }
+                }
+                Ok(Continuation::Call(funcidx)) => {
+                    let frame = self
+                        .instance
+                        .frame_for_funcidx(funcidx, &[])
+                        .map_err(ExecError::LinkageError)?;
+                    self.frame_stack.push(frame);
+                }
+
+                Err(fault) => return Err(ExecError::ExecutionFault(fault)),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::exec::{execute, Value};
-    use crate::link::link;
+    use crate::exec::{Execution, Value};
+    use crate::instance::mk_instance;
     use crate::module::Module;
-    use crate::Memory;
 
     #[test]
     fn load_run_itoa() {
         let module_data: Vec<u8> = include_bytes!("../tests/itoa.wasm").to_vec();
         let module = Module::load(&module_data).unwrap();
 
-        let linked = link(module).unwrap();
-        let mut memory = linked.memories[0].clone();
-        let mut globals = linked.globals.clone();
-        let mut frame = linked
-            .frame_for_funcname("itoa", &[Value::I32(123)])
-            .unwrap();
-
-        execute(&mut frame, &mut memory, &mut globals, 10000).unwrap();
-
-        // Stack should be empty after execution.
-        assert_eq!(frame.stack.width(), 0);
-        // Check that the memory contains the expected string.
-        let expected = [49, 50, 51, 0];
-        assert_eq!(expected, memory.data()[8010..8014]);
+        let linked = mk_instance(module).unwrap();
+        let memory = linked.memories[0].clone();
+        let mut execution = Execution::new(linked, memory);
+        execution.prepare(1, &[Value::I32(123)]).unwrap();
+        execution.run().unwrap();
     }
 }

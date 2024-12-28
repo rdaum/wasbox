@@ -30,7 +30,7 @@ impl<'a> SliceMemory<'a> {
     }
 }
 
-impl<'a> Memory for SliceMemory<'a> {
+impl Memory for SliceMemory<'_> {
     fn data(&self) -> &[u8] {
         self.data
     }
