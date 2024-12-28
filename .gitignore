@@ -1,1 +1,10 @@
-/target
+target/
+.target
+.vscode/
+.cargo
+
+/.idea/.gitignore
+/.idea/modules.xml
+/.idea/wasbox.iml
+/.idea/vcs.xml
+
