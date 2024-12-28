@@ -12,7 +12,6 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-
 pub struct Memory<'a> {
     data: &'a mut [u8],
 }

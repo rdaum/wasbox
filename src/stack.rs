@@ -12,6 +12,11 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
+use crate::exec::Fault;
+
+/// Entries in the stack are raw u64s and are interpreted as the appropriate type when popped.
+/// We could store `Value` here, but it doesn't have a u32/u64 variant, and all uses are explicitly
+/// already casting to the appropriate type, anyway, so no need packing/unpacking a variant everywhere.
 pub struct Stack {
     data: Vec<u64>,
 }
@@ -65,54 +70,85 @@ impl Stack {
         self.data.push(value.to_bits());
     }
 
-    pub fn top_i32(&self) -> i32 {
-        let top: i64 = unsafe { std::mem::transmute(self.data.last().unwrap()) };
-        top as i32
+    pub fn top_i32(&self) -> Result<i32, Fault> {
+        self.data
+            .last()
+            .cloned()
+            .ok_or(Fault::StackUnderflow)
+            .map(|v| unsafe { std::mem::transmute(v as u32) })
     }
 
-    pub fn pop_i32(&mut self) -> i32 {
-        let top: i64 = unsafe { std::mem::transmute(self.data.pop().unwrap()) };
-        top as i32
+    pub fn pop_i32(&mut self) -> Result<i32, Fault> {
+        self.data
+            .pop()
+            .ok_or(Fault::StackUnderflow)
+            .map(|v| unsafe { std::mem::transmute(v as u32) })
     }
 
-    pub fn pop_i64(&mut self) -> i64 {
-        unsafe { std::mem::transmute(self.data.pop().unwrap()) }
+    pub fn pop_i64(&mut self) -> Result<i64, Fault> {
+        self.data
+            .pop()
+            .ok_or(Fault::StackUnderflow)
+            .map(|v| unsafe { std::mem::transmute(v) })
     }
 
-    pub fn top_f32(&self) -> f32 {
-        let top: f64 = unsafe { std::mem::transmute(self.data.last().unwrap()) };
-        top as f32
+    pub fn top_f32(&self) -> Result<f32, Fault> {
+        self.data
+            .last()
+            .cloned()
+            .ok_or(Fault::StackUnderflow)
+            .map(|v| f32::from_bits(v as u32))
     }
 
-    pub fn pop_u32(&mut self) -> u32 {
-        let top = self.data.pop().unwrap();
-        top as u32
+    pub fn pop_u32(&mut self) -> Result<u32, Fault> {
+        self.data
+            .pop()
+            .ok_or(Fault::StackUnderflow)
+            .map(|v| v as u32)
     }
 
-    pub fn top_f64(&self) -> f64 {
-        unsafe { std::mem::transmute(self.data.last().unwrap()) }
-    }
-    pub fn top_u32(&self) -> u32 {
-        let top: u64 = unsafe { std::mem::transmute(self.data.last().unwrap()) };
-        top as u32
-    }
-
-    pub fn pop_u64(&mut self) -> u64 {
-        self.data.pop().unwrap()
+    pub fn top_f64(&self) -> Result<f64, Fault> {
+        self.data
+            .last()
+            .cloned()
+            .ok_or(Fault::StackUnderflow)
+            .map(f64::from_bits)
     }
 
-    pub fn pop_f32(&mut self) -> f32 {
-        f32::from_bits(self.data.pop().unwrap() as u32)
+    pub fn top_u32(&self) -> Result<u32, Fault> {
+        self.data
+            .last()
+            .cloned()
+            .ok_or(Fault::StackUnderflow)
+            .map(|v| v as u32)
     }
 
-    pub fn top_i64(&self) -> i64 {
-        unsafe { std::mem::transmute(self.data.last().unwrap()) }
-    }
-    pub fn pop_f64(&mut self) -> f64 {
-        f64::from_bits(self.data.pop().unwrap())
+    pub fn pop_u64(&mut self) -> Result<u64, Fault> {
+        self.data.pop().ok_or(Fault::StackUnderflow)
     }
 
-    pub fn top_u64(&self) -> u64 {
-        unsafe { std::mem::transmute(self.data.last().unwrap()) }
+    pub fn pop_f32(&mut self) -> Result<f32, Fault> {
+        self.data
+            .pop()
+            .ok_or(Fault::StackUnderflow)
+            .map(|v| f32::from_bits(v as u32))
+    }
+
+    pub fn top_i64(&self) -> Result<i64, Fault> {
+        self.data
+            .last()
+            .cloned()
+            .ok_or(Fault::StackUnderflow)
+            .map(|v| unsafe { std::mem::transmute(v) })
+    }
+    pub fn pop_f64(&mut self) -> Result<f64, Fault> {
+        self.data
+            .pop()
+            .ok_or(Fault::StackUnderflow)
+            .map(f64::from_bits)
+    }
+
+    pub fn top_u64(&self) -> Result<u64, Fault> {
+        self.data.last().cloned().ok_or(Fault::StackUnderflow)
     }
 }

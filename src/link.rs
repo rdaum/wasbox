@@ -13,13 +13,30 @@
 //
 
 use crate::decode::{decode, Program};
-use crate::exec::{exec_fragment, GlobalVar, Value};
+use crate::exec::{exec_fragment, Fault, GlobalVar, Value};
 use crate::frame::Frame;
 use crate::module::Data;
 use crate::stack::Stack;
 use crate::{Module, ValueType};
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 
 pub const WASM_PAGE_SIZE: usize = 1 << 16;
+
+#[derive(Debug)]
+pub enum LinkError {
+    ActiveExpressionError(Fault),
+}
+
+impl Display for LinkError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkError::ActiveExpressionError(e) => write!(f, "Active expression error: {}", e),
+        }
+    }
+}
+
+impl Error for LinkError {}
 
 pub struct Linked {
     pub module: Module,
@@ -27,7 +44,7 @@ pub struct Linked {
     pub globals: Vec<GlobalVar>,
     pub programs: Vec<Program>,
 }
-pub fn link(module: Module) -> Linked {
+pub fn link(module: Module) -> Result<Linked, LinkError> {
     let mut programs = Vec::with_capacity(module.code.len());
 
     // The funcidx in types etc here is relative to both imports and local functions, so we have to
@@ -79,7 +96,8 @@ pub fn link(module: Module) -> Linked {
             Data::Active { expr, data } => {
                 // We have to execute the program located at expr in order to get the address
                 // of the data segment.
-                let data_offset = exec_fragment(module.get_expr(expr), ValueType::I32);
+                let data_offset = exec_fragment(module.get_expr(expr), ValueType::I32)
+                    .map_err(LinkError::ActiveExpressionError)?;
                 let Value::I32(data_offset) = data_offset else {
                     panic!("Data segment offset must be i32");
                 };
@@ -92,7 +110,8 @@ pub fn link(module: Module) -> Linked {
             Data::ActiveMemIdx { memidx, expr, data } => {
                 // This is identical to above but with a memory index set. But standard doesn't
                 // support multiple memories yet. But we'll just go ahead and implement it.
-                let data_offset = exec_fragment(module.get_expr(expr), ValueType::I32);
+                let data_offset = exec_fragment(module.get_expr(expr), ValueType::I32)
+                    .map_err(LinkError::ActiveExpressionError)?;
                 let Value::I32(data_offset) = data_offset else {
                     panic!("Data segment offset must be i32");
                 };
@@ -113,19 +132,20 @@ pub fn link(module: Module) -> Linked {
     for global_segment in &module.globals {
         // Execute the expression in the global
         let program = module.get_expr(&global_segment.expr);
-        let result = exec_fragment(program, global_segment.ty);
+        let result =
+            exec_fragment(program, global_segment.ty).map_err(LinkError::ActiveExpressionError)?;
         globals.push(GlobalVar {
             decl: global_segment.clone(),
             value: result,
         });
     }
 
-    Linked {
+    Ok(Linked {
         module,
         memories,
         globals,
         programs,
-    }
+    })
 }
 
 impl Linked {

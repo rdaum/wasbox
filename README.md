@@ -38,8 +38,6 @@ It can currently do the following
 Notably missing (and this is just the start of the list):
 
 - Import binding. And likely a pile of of "link" time features.
-- Proper error handling in a bunch of places -- panics all over the
-  place in error conditions. (Needs a pile of error enums, etc.)
 - Growable memory.
 - Testing against anything other than "itoa". Will for _sure_ fail
   on anything but the simplest programs right now as it likely has a

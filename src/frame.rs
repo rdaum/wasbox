@@ -13,7 +13,7 @@
 //
 
 use crate::decode::{LabelId, Program, ScopeType};
-use crate::exec::Value;
+use crate::exec::{Fault, Value};
 use crate::stack::Stack;
 use crate::ValueType;
 
@@ -52,10 +52,13 @@ impl Frame {
         });
     }
 
-    pub fn pop_control(&mut self) -> Control {
-        let c = self.control_stack.pop().unwrap();
+    pub fn pop_control(&mut self) -> Result<Control, Fault> {
+        let c = self
+            .control_stack
+            .pop()
+            .ok_or(Fault::ControlStackUnderflow)?;
         self.stack.shrink_to(c.stack_width);
-        c
+        Ok(c)
     }
 
     pub fn jump_label(&mut self, label_id: LabelId) -> bool {
@@ -70,18 +73,26 @@ impl Frame {
         }
     }
 
-    pub fn push_local_to_stack(&mut self, local_index: u32) {
+    pub fn push_local_to_stack(&mut self, local_index: u32) -> Result<(), Fault> {
+        if local_index as usize >= self.locals.len() {
+            return Err(Fault::LocalIndexOutOfBounds);
+        }
         self.locals[local_index as usize].push_to(&mut self.stack);
+        Ok(())
     }
 
-    pub fn set_local_from_stack(&mut self, local_index: u32, pop: bool) {
+    pub fn set_local_from_stack(&mut self, local_index: u32, pop: bool) -> Result<(), Fault> {
+        if local_index as usize >= self.locals.len() {
+            return Err(Fault::LocalIndexOutOfBounds);
+        }
         let type_of_local = self.program.local_types[local_index as usize];
 
         let value = if pop {
-            Value::pop_to(type_of_local, &mut self.stack)
+            Value::pop_to(type_of_local, &mut self.stack)?
         } else {
-            Value::top_to(type_of_local, &mut self.stack)
+            Value::top_to(type_of_local, &mut self.stack)?
         };
         self.locals[local_index as usize] = value;
+        Ok(())
     }
 }
