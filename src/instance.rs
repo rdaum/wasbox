@@ -29,6 +29,7 @@ pub enum LinkError {
     FunctionNotFound,
     UnsupportedFeature(String),
     ArgumentTypeMismatch(usize, ValueType, ValueType),
+    MissingMemory,
 }
 
 impl Display for LinkError {
@@ -42,6 +43,7 @@ impl Display for LinkError {
                 "Argument type mismatch at index {}: expected {:?}, got {:?}",
                 idx, expected, actual
             ),
+            LinkError::MissingMemory => write!(f, "No memory found"),
         }
     }
 }
@@ -59,24 +61,15 @@ pub struct Instance {
 pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
     let mut programs = Vec::with_capacity(module.code.len());
 
-    // The funcidx in types etc here is relative to both imports and local functions, so we have to
-    // have scanned imports to get the right index.
-    let num_imported_funcs = module
-        .imports
-        .iter()
-        .filter(|(_, _, import)| matches!(import, crate::module::Import::Func(_)))
-        .count();
-
     for (i, code) in module.code.iter().enumerate() {
         let program_memory = module.code(i);
         let mut program = decode(program_memory).unwrap();
 
         // Make local types from function signatures + code local signatures
-
-        let funcidx = i + num_imported_funcs;
-        let num_locals = code.locals.len() + module.types[funcidx].params.len();
+        let typeidx = module.functions[i];
+        let num_locals = code.locals.len() + module.types[typeidx].params.len();
         let mut local_types = Vec::with_capacity(num_locals);
-        for param_type in &module.types[funcidx].params {
+        for param_type in &module.types[typeidx].params {
             local_types.push(*param_type);
         }
         for local_type in &module.code[i].locals {
@@ -84,7 +77,7 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
         }
 
         program.local_types = local_types;
-        program.return_types = module.types[funcidx].results.clone();
+        program.return_types = module.types[typeidx].results.clone();
 
         programs.push(program);
     }
@@ -105,7 +98,14 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
         .collect();
 
     // Expectation is that there is only one memory for now.
-    assert_eq!(memories.len(), 1);
+    if memories.is_empty() {
+        return Err(LinkError::MissingMemory);
+    }
+    if memories.len() > 1 {
+        return Err(LinkError::UnsupportedFeature(
+            "Multiple memories not supported yet".to_string(),
+        ));
+    }
 
     // Populate memory from global data.
     for data_segment in &module.data {
@@ -167,6 +167,20 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
 }
 
 impl Instance {
+    pub fn find_funcidx(&self, name: &str) -> Option<u32> {
+        for export in &self.module.exports {
+            if export.name == name {
+                match export.kind {
+                    crate::module::ImportExportKind::Function => {
+                        return Some(export.index);
+                    }
+                    _ => continue,
+                }
+            }
+        }
+        None
+    }
+
     pub fn frame_for_funcidx(&self, index: u32, args: &[Value]) -> Result<Frame, LinkError> {
         // Funcidx must consider also the imports, it isn't just an offset into `code` section.
         // So to find the function index, scan imports first
@@ -188,8 +202,10 @@ impl Instance {
                 _ => continue,
             }
         }
+        let funcidx = index - num_imported_funcs;
+        let typeindx = self.module.functions[funcidx as usize];
         // Types of arguments must match the function signature
-        for (i, (expected, actual)) in self.module.types[index as usize]
+        for (i, (expected, actual)) in self.module.types[typeindx]
             .params
             .iter()
             .zip(args.iter())

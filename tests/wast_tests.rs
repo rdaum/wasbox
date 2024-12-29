@@ -15,9 +15,12 @@
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use wasbox::{DecodeError, LoaderError, Module};
+    use wasbox::{mk_instance, DecodeError, Execution, LoaderError, Module};
+    use wast::core::{NanPattern, WastArgCore, WastRetCore};
     use wast::lexer::Lexer;
-    use wast::{parser, QuoteWat, Wast, WastDirective, Wat};
+    use wast::{
+        parser, QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastInvoke, WastRet, Wat,
+    };
 
     enum DecodeResult {
         Success(()),
@@ -25,7 +28,6 @@ mod tests {
     }
 
     fn module_decode(path: &Path) -> Vec<(usize, Option<String>, DecodeResult, Vec<u8>)> {
-        eprintln!("Doing {:?}", path);
         let file = std::fs::File::open(path).unwrap();
         let input = std::io::read_to_string(file).unwrap();
 
@@ -58,7 +60,6 @@ mod tests {
         let mut decode_results = vec![];
         for (n, name, module_bytes) in found_modules {
             // Load these module bytes as a wasbox module.
-            eprintln!("Processing directive #{n}");
             let binary = module_bytes.clone();
             match Module::load(&module_bytes) {
                 Ok(_m) => {
@@ -114,5 +115,104 @@ mod tests {
             }
             panic!("failures present");
         }
+    }
+
+    fn convert_value(v: &WastArg) -> wasbox::Value {
+        match v {
+            WastArg::Core(WastArgCore::I32(i)) => wasbox::Value::I32(*i),
+            WastArg::Core(WastArgCore::I64(i)) => wasbox::Value::I64(*i),
+            WastArg::Core(WastArgCore::F32(f)) => wasbox::Value::F32(f32::from_bits(f.bits)),
+            WastArg::Core(WastArgCore::F64(f)) => wasbox::Value::F64(f64::from_bits(f.bits)),
+
+            _ => panic!("Unsupported arg type"),
+        }
+    }
+
+    fn convert_ret(v: &WastRet) -> wasbox::Value {
+        match v {
+            WastRet::Core(WastRetCore::I32(i)) => wasbox::Value::I32(*i),
+            WastRet::Core(WastRetCore::I64(i)) => wasbox::Value::I64(*i),
+            WastRet::Core(WastRetCore::F32(NanPattern::Value(f))) => {
+                wasbox::Value::F32(f32::from_bits(f.bits))
+            }
+            WastRet::Core(WastRetCore::F32(NanPattern::ArithmeticNan)) => {
+                wasbox::Value::F32(f32::NAN)
+            }
+            WastRet::Core(WastRetCore::F32(NanPattern::CanonicalNan)) => {
+                wasbox::Value::F32(f32::NAN)
+            }
+            WastRet::Core(WastRetCore::F64(NanPattern::Value(f))) => {
+                wasbox::Value::F64(f64::from_bits(f.bits))
+            }
+            WastRet::Core(WastRetCore::F64(NanPattern::ArithmeticNan)) => {
+                wasbox::Value::F64(f64::NAN)
+            }
+            WastRet::Core(WastRetCore::F64(NanPattern::CanonicalNan)) => {
+                wasbox::Value::F64(f64::NAN)
+            }
+            _ => panic!("Unsupported ret type"),
+        }
+    }
+
+    fn perform_execution_test(path: &Path) {
+        let file = std::fs::File::open(path).unwrap();
+        let input = std::io::read_to_string(file).unwrap();
+
+        let lexer = Lexer::new(&input);
+        let pb = wast::parser::ParseBuffer::new_with_lexer(lexer).unwrap();
+        let ast = parser::parse::<Wast>(&pb)
+            .unwrap_or_else(|_| panic!("Failed to parse WAST file {:?}", path));
+
+        let mut execution = None;
+        for directive in ast.directives {
+            match directive {
+                WastDirective::Module(mut module) => {
+                    let m = Module::load(&module.encode().unwrap()).unwrap();
+                    let i = mk_instance(m).unwrap();
+                    let memory = i.memories[0].clone();
+                    execution = Some(Execution::new(i, memory));
+                }
+                WastDirective::AssertReturn { exec, results, .. } => match exec {
+                    WastExecute::Invoke(WastInvoke {
+                        span: _,
+                        module: _,
+                        name,
+                        args,
+                    }) => {
+                        let execution = execution.as_mut().unwrap();
+                        let funcidx = execution
+                            .instance()
+                            .find_funcidx(name)
+                            .unwrap_or_else(|| panic!("Function not found: {:?}", name));
+
+                        let arg_set: Vec<_> = args.iter().map(convert_value).collect();
+                        execution.prepare(funcidx, &arg_set).unwrap();
+                        execution.run().unwrap();
+                        let result = execution.result().unwrap();
+
+                        let expected_results: Vec<_> = results.iter().map(convert_ret).collect();
+                        for (i, (expected, actual)) in
+                            expected_results.iter().zip(result.iter()).enumerate()
+                        {
+                            assert!(
+                                expected.eq_w_nan(actual),
+                                "Mismatch at index {}: expected {:?}, got {:?}",
+                                i,
+                                expected,
+                                actual
+                            );
+                        }
+                    }
+                    _ => panic!("Unsupported exec directive"),
+                },
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn address_test() {
+        let path = Path::new("tests/testsuite/address.wast");
+        perform_execution_test(path);
     }
 }

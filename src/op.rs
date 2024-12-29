@@ -206,6 +206,14 @@ pub enum Op {
     F32Max,
     F32Copysign,
 
+    F64Abs,
+    F64Neg,
+    F64Ceil,
+    F64Floor,
+    F64Trunc,
+    F64Nearest,
+    F64Sqrt,
+
     I32WrapI64,
     I32TruncF32S,
     I32TruncF32U,

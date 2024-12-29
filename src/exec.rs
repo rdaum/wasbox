@@ -771,6 +771,34 @@ where
                 let a = frame.stack.pop_f32()?;
                 frame.stack.push_f32(a.copysign(b));
             }
+            Op::F64Abs => {
+                let value = frame.stack.pop_f64()?;
+                frame.stack.push_f64(value.abs());
+            }
+            Op::F64Neg => {
+                let value = frame.stack.pop_f64()?;
+                frame.stack.push_f64(-value);
+            }
+            Op::F64Ceil => {
+                let value = frame.stack.pop_f64()?;
+                frame.stack.push_f64(value.ceil());
+            }
+            Op::F64Floor => {
+                let value = frame.stack.pop_f64()?;
+                frame.stack.push_f64(value.floor());
+            }
+            Op::F64Trunc => {
+                let value = frame.stack.pop_f64()?;
+                frame.stack.push_f64(value.trunc());
+            }
+            Op::F64Nearest => {
+                let value = frame.stack.pop_f64()?;
+                frame.stack.push_f64(value.round());
+            }
+            Op::F64Sqrt => {
+                let value = frame.stack.pop_f64()?;
+                frame.stack.push_f64(value.sqrt());
+            }
             Op::I32WrapI64 => {
                 let value = frame.stack.pop_i64()?;
                 // Turn to i32, wrapping around if necessary
@@ -910,7 +938,7 @@ pub struct GlobalVar {
     pub value: Value,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
     I32(i32),
     I64(i64),
@@ -919,6 +947,8 @@ pub enum Value {
     V128(u128),
     Unit,
 }
+
+impl Eq for Value {}
 
 impl Value {
     pub(crate) fn type_of(&self) -> ValueType {
@@ -983,6 +1013,27 @@ impl Value {
             Value::Unit => {
                 stack.push_u64(0);
             }
+        }
+    }
+
+    /// Equality comparison where NaN == NaN, for tests.
+    pub fn eq_w_nan(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::F32(a), Value::F32(b)) => {
+                if a.is_nan() && b.is_nan() {
+                    true
+                } else {
+                    a == b
+                }
+            }
+            (Value::F64(a), Value::F64(b)) => {
+                if a.is_nan() && b.is_nan() {
+                    true
+                } else {
+                    a == b
+                }
+            }
+            _ => self == other,
         }
     }
 }
@@ -1067,6 +1118,14 @@ where
             memory,
             result: None,
         }
+    }
+
+    pub fn instance(&self) -> &Instance {
+        &self.instance
+    }
+
+    pub fn result(&self) -> Option<&[Value]> {
+        self.result.as_deref()
     }
 
     pub fn prepare(&mut self, funcidx: u32, args: &[Value]) -> Result<(), ExecError> {

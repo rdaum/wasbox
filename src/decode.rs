@@ -301,8 +301,16 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
             OpCode::Return => {
                 prg.push(Op::Return);
             }
-            OpCode::Call => {}
-            OpCode::CallIndirect => {}
+            OpCode::Call => {
+                let index = reader.load_imm_varuint32()?;
+                prg.push(Op::Call(index));
+            }
+            OpCode::CallIndirect => {
+                let index = reader.load_imm_varuint32()?;
+                let _table = reader.load_imm_varuint32()?;
+                assert_eq!(0, _table);
+                prg.push(Op::CallIndirect(index));
+            }
             OpCode::Drop => {
                 prg.push(Op::Drop);
             }
@@ -695,6 +703,27 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
             }
             OpCode::F32Copysign => {
                 prg.push(Op::F32Copysign);
+            }
+            OpCode::F64Abs => {
+                prg.push(Op::F64Abs);
+            }
+            OpCode::F64Neg => {
+                prg.push(Op::F64Neg);
+            }
+            OpCode::F64Ceil => {
+                prg.push(Op::F64Ceil);
+            }
+            OpCode::F64Floor => {
+                prg.push(Op::F64Floor);
+            }
+            OpCode::F64Trunc => {
+                prg.push(Op::F64Trunc);
+            }
+            OpCode::F64Nearest => {
+                prg.push(Op::F64Nearest);
+            }
+            OpCode::F64Sqrt => {
+                prg.push(Op::F64Sqrt);
             }
             OpCode::I32WrapI64 => {
                 prg.push(Op::I32WrapI64);
