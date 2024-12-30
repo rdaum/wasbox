@@ -14,8 +14,11 @@
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::{Debug, Formatter};
     use std::path::Path;
-    use wasbox::{mk_instance, DecodeError, Execution, LoaderError, Module};
+    use wasbox::{
+        mk_instance, DecodeError, Execution, LinkError, LoaderError, Module, VectorMemory,
+    };
     use wast::core::{NanPattern, WastArgCore, WastRetCore};
     use wast::lexer::Lexer;
     use wast::{
@@ -96,6 +99,9 @@ mod tests {
                         DecodeError::UnsupportedType(_, _),
                     ))
                     | DecodeResult::Failure(LoaderError::DecoderError(
+                        DecodeError::MalformedMemory(_),
+                    )) => {}
+                    DecodeResult::Failure(LoaderError::DecoderError(
                         DecodeError::UnimplementedOpcode(_, _),
                     )) => {}
                     DecodeResult::Failure(e) => {
@@ -154,7 +160,41 @@ mod tests {
         }
     }
 
-    fn perform_execution_test(path: &Path) {
+    enum TestModule {
+        None,
+        Loaded(Box<Execution<VectorMemory>>),
+        LoadFailed(LoaderError),
+        LinkFailed(LinkError),
+    }
+
+    impl Debug for TestModule {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            match self {
+                TestModule::None => write!(f, "None"),
+                TestModule::Loaded(_) => write!(f, "Loaded"),
+                TestModule::LoadFailed(e) => write!(f, "LoadFailed({:?})", e),
+                TestModule::LinkFailed(e) => write!(f, "LinkFailed({:?})", e),
+            }
+        }
+    }
+
+    impl TestModule {
+        fn load(binary: &[u8]) -> Self {
+            let m = Module::load(binary);
+            match m {
+                Ok(m) => match mk_instance(m) {
+                    Ok(i) => {
+                        let memory = i.memories[0].clone();
+                        TestModule::Loaded(Box::new(Execution::new(i, memory)))
+                    }
+                    Err(e) => TestModule::LinkFailed(e),
+                },
+                Err(e) => TestModule::LoadFailed(e),
+            }
+        }
+    }
+
+    fn perform_wast(path: &Path) {
         let file = std::fs::File::open(path).unwrap();
         let input = std::io::read_to_string(file).unwrap();
 
@@ -163,23 +203,37 @@ mod tests {
         let ast = parser::parse::<Wast>(&pb)
             .unwrap_or_else(|_| panic!("Failed to parse WAST file {:?}", path));
 
-        let mut execution = None;
-        for directive in ast.directives {
+        let mut execution = TestModule::None;
+        for (directive_num, directive) in ast.directives.into_iter().enumerate() {
+            let directive_span = directive.span();
+            let linecol = directive_span.linecol_in(&input);
+
             match directive {
                 WastDirective::Module(mut module) => {
-                    let m = Module::load(&module.encode().unwrap()).unwrap();
-                    let i = mk_instance(m).unwrap();
-                    let memory = i.memories[0].clone();
-                    execution = Some(Execution::new(i, memory));
+                    let encoded = module.encode().unwrap();
+                    let m = Module::load(&encoded);
+                    execution = match m {
+                        Ok(m) => match mk_instance(m) {
+                            Ok(i) => {
+                                let memory = i.memories[0].clone();
+                                TestModule::Loaded(Box::new(Execution::new(i, memory)))
+                            }
+                            Err(e) => TestModule::LinkFailed(e),
+                        },
+                        Err(e) => TestModule::LoadFailed(e),
+                    };
                 }
                 WastDirective::AssertReturn { exec, results, .. } => match exec {
+                    // Invoke runs executions on the last loaded module.
                     WastExecute::Invoke(WastInvoke {
                         span: _,
                         module: _,
                         name,
                         args,
                     }) => {
-                        let execution = execution.as_mut().unwrap();
+                        let TestModule::Loaded(ref mut execution) = execution else {
+                            panic!("Expected a loaded module for invocation @ {:?}", linecol);
+                        };
                         let funcidx = execution
                             .instance()
                             .find_funcidx(name)
@@ -196,15 +250,32 @@ mod tests {
                         {
                             assert!(
                                 expected.eq_w_nan(actual),
-                                "Mismatch at index {}: expected {:?}, got {:?}",
+                                "Mismatch at index {}: expected {:?}, got {:?} for directive #{directive_num} @ {linecol:?}",
                                 i,
                                 expected,
                                 actual
                             );
                         }
                     }
-                    _ => panic!("Unsupported exec directive"),
+                    _ => panic!("Unsupported exec directive: {:?} @ {:?}", exec, linecol),
                 },
+                WastDirective::AssertMalformed {
+                    mut module,
+                    message,
+                    ..
+                } => {
+                    execution = TestModule::load(&module.encode().unwrap());
+                    // There has to be a LoadFailed or LinkError for this to be malformed.
+                    match execution {
+                        TestModule::LoadFailed(_) | TestModule::LinkFailed(_) => {
+                            // All good.
+                        }
+                        _ => panic!(
+                            "Expected a load error w/ {message}, got {execution:?} for directive #{directive_num} @ {:?}",
+                            linecol,
+                        ),
+                    }
+                }
                 _ => {}
             }
         }
@@ -213,6 +284,12 @@ mod tests {
     #[test]
     fn address_test() {
         let path = Path::new("tests/testsuite/address.wast");
-        perform_execution_test(path);
+        perform_wast(path);
+    }
+
+    #[test]
+    fn binary_test() {
+        let path = Path::new("tests/testsuite/binary.wast");
+        perform_wast(path);
     }
 }

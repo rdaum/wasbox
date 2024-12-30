@@ -14,12 +14,12 @@
 
 use crate::module::leb128::LEB128Reader;
 use crate::module::{
-    parse, Code, Data, ElementMode, ElementSegment, Elements, ExportEntry, FuncType, Import,
-    ImportExportKind, MemorySection, ReferenceType, Region, SectionType, Table,
+    Code, Data, ElementMode, ElementSegment, Elements, ExportEntry, Import, ImportExportKind,
+    MemorySection, ReferenceType, Region, SectionType, Table,
 };
-use crate::DecodeError::{FailedToDecode, InvalidDataSegmentType};
+use crate::DecodeError::{FailedToDecode, InvalidDataSegmentType, MalformedMemory};
 use crate::LoaderError::DecoderError;
-use crate::{DecodeError, Global, LoaderError, Module, ValueType};
+use crate::{DecodeError, FuncType, Global, LoaderError, Module, ValueType};
 
 pub const SECTION_ID_CUSTOM: u8 = 0;
 pub const SECTION_ID_TYPE: u8 = 1;
@@ -44,7 +44,30 @@ fn read_limits(reader: &mut LEB128Reader) -> Result<(u32, Option<u32>), DecodeEr
     } else {
         None
     };
-    Ok((initial, maximum))
+
+    let limits = (initial, maximum);
+    // There has to be at least 1 page of memory.
+    if limits.0 == 0 {
+        return Err(MalformedMemory(
+            "Memory limits must be at least 1 page".to_string(),
+        ));
+    }
+    // If the limits is malformed (too large, etc.), that's a problem.
+    if limits.0 > MAX_MEMORY_SIZE_PAGES {
+        return Err(MalformedMemory("Memory limits are too large".to_string()));
+    }
+    if let Some(max) = limits.1 {
+        if max > MAX_MEMORY_SIZE_PAGES {
+            return Err(MalformedMemory("Memory limits are too large".to_string()));
+        }
+        if max < limits.0 {
+            return Err(MalformedMemory(
+                "Maximum memory size is less than minimum".to_string(),
+            ));
+        }
+    }
+
+    Ok(limits)
 }
 
 fn read_table(reader: &mut LEB128Reader) -> Result<Table, LoaderError> {
@@ -55,6 +78,8 @@ fn read_table(reader: &mut LEB128Reader) -> Result<Table, LoaderError> {
     Ok(Table { ty, limits })
 }
 
+const MAX_MEMORY_SIZE_PAGES: u32 = 0x10000;
+
 impl Module {
     pub fn load(module_data: &[u8]) -> Result<Self, LoaderError> {
         // Check for the WASM magic number
@@ -62,8 +87,15 @@ impl Module {
             return Err(LoaderError::InvalidMagicNumber);
         }
 
+        if module_data.len() < 8 {
+            return Err(LoaderError::InvalidVersion);
+        }
         // Check for the WASM version
-        let version = u32::from_le_bytes(module_data[4..8].try_into().unwrap());
+        let version = u32::from_le_bytes(
+            module_data[4..8]
+                .try_into()
+                .map_err(|_| LoaderError::InvalidVersion)?,
+        );
         if version != 1 {
             return Err(LoaderError::InvalidVersion);
         }
@@ -82,6 +114,7 @@ impl Module {
         let mut data = vec![];
         let mut element_segments = vec![];
         let mut start_function = None;
+        let mut data_count = None;
         while reader.remaining() > 0 {
             // Read the section ID
             let section_type = reader.load_imm_u8().map_err(DecoderError)?;
@@ -104,15 +137,15 @@ impl Module {
                         let num_param_types = reader.load_imm_varuint32().map_err(DecoderError)?;
                         let mut params = Vec::with_capacity(num_param_types as usize);
                         for _ in 0..num_param_types {
-                            let param = ValueType::read(&mut reader).map_err(DecoderError)?;
-                            params.push(param);
+                            let param_type = ValueType::read(&mut reader).map_err(DecoderError)?;
+                            params.push(param_type);
                         }
 
                         let num_result_types = reader.load_imm_varuint32().map_err(DecoderError)?;
                         let mut results = Vec::with_capacity(num_result_types as usize);
                         for _ in 0..num_result_types {
-                            let result = ValueType::read(&mut reader).map_err(DecoderError)?;
-                            results.push(result);
+                            let result_type = ValueType::read(&mut reader).map_err(DecoderError)?;
+                            results.push(result_type);
                         }
 
                         types.push(FuncType { params, results });
@@ -152,6 +185,15 @@ impl Module {
                         let mut locals = Vec::with_capacity(num_types as usize);
                         for _ in 0..num_types {
                             let count = reader.load_imm_varuint32().map_err(DecoderError)?;
+                            // This is an obscene number of locals, so we'll just fail here.
+                            // In all likelihood this is a malformed module. This number was chosen
+                            // because of the binary WAST tests, but it probably could be much
+                            // lower.
+                            if count >= 0x40000000 {
+                                return Err(DecoderError(FailedToDecode(
+                                    "Too many locals in a function".to_string(),
+                                )));
+                            }
                             let ty = ValueType::read(&mut reader).map_err(DecoderError)?;
                             for _ in 0..count {
                                 locals.push(ty);
@@ -184,13 +226,12 @@ impl Module {
                             ImportExportKind::Table => {
                                 let reftype = reader.load_imm_u8().map_err(DecoderError)?;
                                 let reftype = ReferenceType::from_u8(reftype)?;
-                                let limits =
-                                    parse::read_limits(&mut reader).map_err(DecoderError)?;
+                                let limits = read_limits(&mut reader).map_err(DecoderError)?;
                                 Import::Table(reftype, limits)
                             }
                             ImportExportKind::Memory => {
-                                let limits =
-                                    parse::read_limits(&mut reader).map_err(DecoderError)?;
+                                let limits = read_limits(&mut reader).map_err(DecoderError)?;
+
                                 Import::Memory(limits)
                             }
                             ImportExportKind::Global => {
@@ -206,7 +247,7 @@ impl Module {
                     // Table section
                     let num_tables = reader.load_imm_varuint32().map_err(DecoderError)?;
                     for _ in 0..num_tables {
-                        let t = parse::read_table(&mut reader)?;
+                        let t = read_table(&mut reader)?;
 
                         tables.push(t);
                     }
@@ -371,7 +412,7 @@ impl Module {
                     // Memory section
                     let num_memories = reader.load_imm_varuint32().map_err(DecoderError)?;
                     for _ in 0..num_memories {
-                        let limits = parse::read_limits(&mut reader).map_err(DecoderError)?;
+                        let limits = read_limits(&mut reader).map_err(DecoderError)?;
                         memories.push(MemorySection { limits });
                     }
                 }
@@ -430,8 +471,7 @@ impl Module {
                     reader.advance(section_length as usize);
                 }
                 SectionType::DataCount => {
-                    // We skip the data count section
-                    reader.advance(section_length as usize);
+                    data_count = Some(reader.load_imm_varuint32().map_err(DecoderError)?);
                 }
             }
 
@@ -449,8 +489,30 @@ impl Module {
             }
         }
 
-        assert_eq!(reader.remaining(), 0);
-        assert_eq!(code.iter().len(), functions.len());
+        // Nothing should be remaining in the reader.
+        if reader.remaining() > 0 {
+            return Err(DecoderError(FailedToDecode(format!(
+                "Reader has {} bytes remaining",
+                reader.remaining()
+            ))));
+        }
+
+        // # of code must equal functions or this is malformed.
+        if code.iter().len() != functions.len() {
+            return Err(DecoderError(FailedToDecode(
+                "Code section length does not match function section length".to_string(),
+            )));
+        }
+
+        // Data count must be equal to the number of data segments, if it's been specified
+        if let Some(data_count) = data_count {
+            if data_count != data.len() as u32 {
+                return Err(DecoderError(FailedToDecode(
+                    "Data count does not match the number of data segments".to_string(),
+                )));
+            }
+        }
+
         Ok(Module {
             module_data: module_data.to_vec(),
             version,

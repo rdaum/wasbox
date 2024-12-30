@@ -13,7 +13,7 @@
 //
 
 use crate::decode::{LabelId, ScopeType};
-use crate::ValueType;
+use crate::TypeSignature;
 
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct MemArg {
@@ -30,7 +30,7 @@ pub enum Op {
 
     // Control flow.
     /// Block->End
-    StartScope(ValueType, ScopeType, LabelId),
+    StartScope(TypeSignature, ScopeType, LabelId),
     EndScope(ScopeType),
     /// Label is the "else" which could be either right after en Else block, or right before End.
     If(LabelId),

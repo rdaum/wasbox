@@ -22,7 +22,7 @@ use crate::module::parse::{
     SECTION_ID_MEMORY, SECTION_ID_START, SECTION_ID_TABLE, SECTION_ID_TYPE,
 };
 use crate::LoaderError::{DecoderError, UnsupportedSectionType};
-use crate::{DecodeError, ValueType};
+use crate::{DecodeError, FuncType, ValueType};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -122,12 +122,6 @@ impl ReferenceType {
 pub struct SectionInfo {
     pub id: u8,
     pub offset: usize,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FuncType {
-    pub params: Vec<ValueType>,
-    pub results: Vec<ValueType>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

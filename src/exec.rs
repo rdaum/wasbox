@@ -20,7 +20,7 @@ use crate::memory::SliceMemory;
 use crate::module::Global;
 use crate::op::{MemArg, Op};
 use crate::stack::Stack;
-use crate::{Instance, ValueType};
+use crate::{FuncType, Instance, Type, TypeSignature, ValueType};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 
@@ -56,6 +56,8 @@ pub enum Fault {
     MemoryOutOfBounds,
     /// Memory growth not supported for this memory type, or memory is at maximum size
     CannotGrowMemory,
+    /// Unresolvable type index
+    UnresolvableTypeIndex(u32),
 }
 
 impl Display for Fault {
@@ -69,17 +71,32 @@ impl Display for Fault {
             Fault::GlobalIndexOutOfBounds => write!(f, "Global index out of bounds"),
             Fault::MemoryOutOfBounds => write!(f, "Memory out of bounds"),
             Fault::CannotGrowMemory => write!(f, "Cannot grow memory"),
+            Fault::UnresolvableTypeIndex(idx) => write!(f, "Unresolvable type index: {}", idx),
         }
     }
 }
 
 impl Error for Fault {}
 
+fn resolve_type(types: &[FuncType], ts: TypeSignature) -> Result<Type, Fault> {
+    match ts {
+        TypeSignature::ValueType(v) => Ok(Type::ValueType(v)),
+        TypeSignature::Index(idx) => {
+            let ft = types
+                .get(idx as usize)
+                .ok_or(Fault::UnresolvableTypeIndex(idx))
+                .cloned();
+            Ok(Type::FunctionType(ft?))
+        }
+    }
+}
+
 fn execute<M>(
     frame: &mut Frame,
     memory: &mut M,
     globals: &mut [GlobalVar],
     max_ticks: usize,
+    types: &[FuncType],
 ) -> Result<Continuation, Fault>
 where
     M: Memory,
@@ -102,18 +119,19 @@ where
         match op {
             Op::Nop => {}
             Op::StartScope(sig, scope_type, label) => {
-                frame.push_control(sig, scope_type, label);
+                let resolved_type = resolve_type(types, sig)?;
+                frame.push_control(resolved_type, scope_type, label);
             }
             Op::EndScope(c) => {
                 // If this is EndScope(Program), we need to preserve the stack for return value.
                 if let ScopeType::Program = &c {
                     return Ok(Continuation::DoneReturn);
                 }
-                let (end_scope, push_value) = frame.pop_control()?;
+                let (end_scope, result_values) = frame.pop_control()?;
 
                 // Shrink-stack to the width declared in the control scope.
                 frame.stack.shrink_to(end_scope.stack_width);
-                if let Some(value) = push_value {
+                for value in result_values {
                     value.push_to(&mut frame.stack);
                 }
             }
@@ -1064,6 +1082,7 @@ pub(crate) fn exec_fragment(program: &[u8], return_type: ValueType) -> Result<Va
         &mut const_prg_memory,
         &mut const_prg_globals,
         EXPR_TICK_LIMIT,
+        &[],
     )?;
     // Must be `ProgramEnd`, or there's a bug, and that's UnexpectedResult
     match result {
@@ -1146,6 +1165,7 @@ where
                 &mut self.memory,
                 &mut self.instance.globals,
                 10000,
+                &self.instance.module.types,
             );
             match result {
                 Ok(Continuation::ProgramEnd) | Ok(Continuation::DoneReturn) => {

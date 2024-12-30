@@ -15,7 +15,7 @@
 use crate::module::LEB128Reader;
 use crate::op::{MemArg, Op};
 use crate::opcode::OpCode;
-use crate::ValueType;
+use crate::{TypeSignature, ValueType};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 
@@ -68,10 +68,31 @@ impl Display for DecodeError {
 
 impl Error for DecodeError {}
 
-fn read_memarg(reader: &mut LEB128Reader) -> Result<MemArg, DecodeError> {
+const MAX_MEMORY_OFFSET: u32 = 0xffff_ffff;
+
+fn read_memarg(reader: &mut LEB128Reader, max_align: u8) -> Result<MemArg, DecodeError> {
     // align, offset in mem
     let align = reader.load_imm_varuint32()?;
-    let offset = reader.load_imm_varuint32()? as usize;
+    // we load offset as a u64, but then check it's within the bounds of a u32, this seemed
+    // to be the only way to not get a "0" back from the leb128 reader here, when the value was
+    // over 0xffff_ffff (?!)
+    let offset = reader.load_imm_varuint64()?;
+
+    if offset > (MAX_MEMORY_OFFSET as u64) {
+        return Err(DecodeError::MalformedMemory(format!(
+            "Offset too large: {:#0x}",
+            offset
+        )));
+    }
+    // check alignment
+    if align > (max_align as u32) {
+        return Err(DecodeError::MalformedMemory(format!(
+            "Invalid alignment: {:#0x}",
+            align
+        )));
+    }
+
+    let offset = offset as usize;
     Ok(MemArg { align, offset })
 }
 
@@ -123,7 +144,7 @@ pub type LabelId = usize;
 struct Scope {
     scope_type: ScopeType,
     #[allow(dead_code)]
-    signature: ValueType,
+    signature: TypeSignature,
     label: LabelId,
 }
 
@@ -174,12 +195,12 @@ impl Labels {
         let label = self.new_bound_label(0);
         Scope {
             scope_type: ScopeType::Program,
-            signature: ValueType::Unit,
+            signature: TypeSignature::ValueType(ValueType::Unit),
             label,
         }
     }
 
-    fn mk_loop(&mut self, signature: ValueType) -> Scope {
+    fn mk_loop(&mut self, signature: TypeSignature) -> Scope {
         let label = self.new_unbound_label();
         Scope {
             scope_type: ScopeType::Loop,
@@ -188,7 +209,7 @@ impl Labels {
         }
     }
 
-    fn mk_block(&mut self, signature: ValueType) -> Scope {
+    fn mk_block(&mut self, signature: TypeSignature) -> Scope {
         let label = self.new_unbound_label();
         Scope {
             scope_type: ScopeType::Block,
@@ -197,7 +218,7 @@ impl Labels {
         }
     }
 
-    fn mk_if_else(&mut self, signature: ValueType) -> Scope {
+    fn mk_if_else(&mut self, signature: TypeSignature) -> Scope {
         let label = self.new_unbound_label();
         Scope {
             scope_type: ScopeType::IfElse,
@@ -230,21 +251,21 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
             }
 
             OpCode::Block => {
-                let signature = ValueType::read(&mut reader)?;
+                let signature = ValueType::read_signature(&mut reader)?;
                 let block = prg.labels.mk_block(signature);
                 let label = block.label;
                 scope_stack.push(block);
                 prg.push(Op::StartScope(signature, ScopeType::Block, label));
             }
             OpCode::Loop => {
-                let signature = ValueType::read(&mut reader)?;
+                let signature = ValueType::read_signature(&mut reader)?;
                 let block = prg.labels.mk_loop(signature);
                 prg.push(Op::StartScope(signature, ScopeType::Loop, block.label));
                 prg.labels.bind_label(block.label, prg.ops.len());
                 scope_stack.push(block);
             }
             OpCode::If => {
-                let signature = ValueType::read(&mut reader)?;
+                let signature = ValueType::read_signature(&mut reader)?;
                 let block = prg.labels.mk_if_else(signature);
 
                 prg.push(Op::StartScope(signature, ScopeType::IfElse, block.label));
@@ -334,106 +355,124 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 prg.push(Op::GetGlobal(index));
             }
             OpCode::LoadI32 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 2)?;
                 prg.push(Op::LoadI32(memarg));
             }
             OpCode::LoadI64 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 3)?;
                 prg.push(Op::LoadI64(memarg));
             }
             OpCode::LoadF32 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 2)?;
                 prg.push(Op::LoadF32(memarg));
             }
             OpCode::LoadF64 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 3)?;
                 prg.push(Op::LoadF64(memarg));
             }
             OpCode::Load8Se => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 0)?;
                 prg.push(Op::Load8SE(memarg));
             }
 
             // Extending load signed
             OpCode::Load16Se => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 1)?;
                 prg.push(Op::Load16Se(memarg));
             }
             OpCode::Load8I64Se => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 0)?;
                 prg.push(Op::Load8I64Se(memarg));
             }
             OpCode::Load8I64Ze => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 0)?;
                 prg.push(Op::Load8I64Ze(memarg));
             }
             OpCode::Load16I64Se => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 1)?;
                 prg.push(Op::Load16I64Se(memarg));
             }
             OpCode::Load32I64Se => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 2)?;
                 prg.push(Op::Load32I64Se(memarg));
             }
 
             // Extending load, unsigned
             OpCode::Load8Ze => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 0)?;
                 prg.push(Op::Load8Ze(memarg));
             }
             OpCode::Load16Ze => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 1)?;
                 prg.push(Op::Load16Ze(memarg));
             }
             OpCode::Load16I64Ze => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 1)?;
                 prg.push(Op::Load16I64Ze(memarg));
             }
             OpCode::Load32I64Ze => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 2)?;
                 prg.push(Op::Load32I64Ze(memarg));
             }
 
             OpCode::StoreI32 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 2)?;
                 prg.push(Op::StoreI32(memarg));
             }
             OpCode::StoreI64 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 3)?;
                 prg.push(Op::StoreI64(memarg));
             }
             OpCode::StoreF32 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 2)?;
                 prg.push(Op::StoreF32(memarg));
             }
             OpCode::StoreF64 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 3)?;
                 prg.push(Op::StoreF64(memarg));
             }
             OpCode::Store8_32 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 0)?;
                 prg.push(Op::Store8_32(memarg));
             }
             OpCode::Store16_32 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 1)?;
                 prg.push(Op::Store16_32(memarg));
             }
             OpCode::Store8_64 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 0)?;
                 prg.push(Op::Store8_64(memarg));
             }
             OpCode::Store16_64 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 1)?;
                 prg.push(Op::Store16_64(memarg));
             }
             OpCode::Store32_64 => {
-                let memarg = read_memarg(&mut reader)?;
+                let memarg = read_memarg(&mut reader, 2)?;
                 prg.push(Op::Store32_64(memarg));
             }
             OpCode::CurrentMemorySize => {
+                // Should be follow by a single u8, which is expected to be 0x00, or this is a
+                // malformed memory instruction.
+                let m_idx = reader.load_imm_u8()?;
+                if m_idx != 0x00 {
+                    return Err(DecodeError::FailedToDecode(format!(
+                        "Expected GrowMemory 0x00, got {:#0x}",
+                        m_idx
+                    )));
+                }
                 prg.push(Op::MemorySize);
             }
             OpCode::GrowMemory => {
+                // Should be follow by a single u8, which is expected to be 0x00, or this is a
+                // malformed memory instruction.
+                let m_idx = reader.load_imm_u8()?;
+                if m_idx != 0x00 {
+                    return Err(DecodeError::FailedToDecode(format!(
+                        "Expected GrowMemory 0x00, got {:#0x}",
+                        m_idx
+                    )));
+                }
                 prg.push(Op::MemoryGrow);
             }
             OpCode::I32Const => {
@@ -928,6 +967,17 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
             OpCode::GetLocal | OpCode::SetLocal | OpCode::Tee | OpCode::GetGlobal => {
                 reader.load_imm_varuint32()?;
             }
+            OpCode::CurrentMemorySize | OpCode::GrowMemory => {
+                // Should be followed by a single u8, which is expected to be 0x00, or this is a
+                // malformed memory instruction.
+                let m_idx = reader.load_imm_u8()?;
+                if m_idx != 0x00 {
+                    return Err(DecodeError::FailedToDecode(format!(
+                        "Expected GrowMemory 0x00, got {:#0x}",
+                        m_idx
+                    )));
+                }
+            }
             OpCode::LoadI32
             | OpCode::LoadI64
             | OpCode::LoadF32
@@ -951,7 +1001,9 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
             | OpCode::Store8_64
             | OpCode::Store16_64
             | OpCode::Store32_64 => {
-                read_memarg(reader)?;
+                // For scan phase we don't bother enforcing max alignment, that will get caught
+                // during decode
+                read_memarg(reader, 3)?;
             }
             OpCode::I32Const => {
                 reader.load_imm_varint32()?;

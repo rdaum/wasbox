@@ -17,7 +17,7 @@ use crate::exec::{exec_fragment, Fault, GlobalVar, Value};
 use crate::frame::Frame;
 use crate::module::Data;
 use crate::stack::Stack;
-use crate::{Module, ValueType, VectorMemory};
+use crate::{DecodeError, Module, ValueType, VectorMemory};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -26,6 +26,7 @@ pub const WASM_PAGE_SIZE: usize = 1 << 16;
 #[derive(Debug)]
 pub enum LinkError {
     ActiveExpressionError(Fault),
+    DecodeError(DecodeError),
     FunctionNotFound,
     UnsupportedFeature(String),
     ArgumentTypeMismatch(usize, ValueType, ValueType),
@@ -44,6 +45,7 @@ impl Display for LinkError {
                 idx, expected, actual
             ),
             LinkError::MissingMemory => write!(f, "No memory found"),
+            LinkError::DecodeError(e) => write!(f, "Decode error: {}", e),
         }
     }
 }
@@ -63,7 +65,7 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
 
     for (i, code) in module.code.iter().enumerate() {
         let program_memory = module.code(i);
-        let mut program = decode(program_memory).unwrap();
+        let mut program = decode(program_memory).map_err(LinkError::DecodeError)?;
 
         // Make local types from function signatures + code local signatures
         let typeidx = module.functions[i];
@@ -211,6 +213,7 @@ impl Instance {
             .zip(args.iter())
             .enumerate()
         {
+            // TODO: this doesn't seem to work with the itoa example?!
             if *expected != actual.type_of() {
                 return Err(LinkError::ArgumentTypeMismatch(
                     i,

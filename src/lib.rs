@@ -39,12 +39,25 @@ pub use crate::decode::DecodeError;
 use crate::module::LEB128Reader;
 pub use exec::{ExecError, Execution, Value};
 pub use frame::Frame;
+pub use instance::LinkError;
 pub use instance::{mk_instance, Instance};
 pub use memory::{Memory, SliceMemory, VectorMemory};
 pub use module::{
     Code, Data, ElementMode, ElementSegment, Elements, Global, ImportExportKind, LoaderError,
     MemorySection, Module, ReferenceType, SectionInfo,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Type {
+    ValueType(ValueType),
+    FunctionType(FuncType),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FuncType {
+    pub params: Vec<ValueType>,
+    pub results: Vec<ValueType>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
@@ -58,9 +71,14 @@ pub enum ValueType {
     ExternRef,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeSignature {
+    ValueType(ValueType),
+    Index(u32),
+}
+
 impl ValueType {
-    fn read(reader: &mut LEB128Reader) -> Result<Self, DecodeError> {
-        let value = reader.load_imm_varuint32()?;
+    fn from_u32(value: u32) -> Result<Self, DecodeError> {
         match value {
             0x40 => Ok(ValueType::Unit),
             0x70 | 0x6f => Err(DecodeError::UnsupportedType(
@@ -74,6 +92,27 @@ impl ValueType {
             0x7B => Ok(ValueType::V128),
             _ => Err(DecodeError::InvalidSignature(value)),
         }
+    }
+
+    /// Read a value type from a reader without allowing for type index indirection.
+    fn read(reader: &mut LEB128Reader) -> Result<Self, DecodeError> {
+        let value = reader.load_imm_varuint32()?;
+        if value == 0x40 {
+            return Ok(ValueType::Unit);
+        }
+        Self::from_u32(value)
+    }
+
+    /// Read a full signature, allowing for type index indirection.
+    fn read_signature(reader: &mut LEB128Reader) -> Result<TypeSignature, DecodeError> {
+        let value = reader.load_imm_varint32()?;
+        if value == 0x40 {
+            return Ok(TypeSignature::ValueType(ValueType::Unit));
+        }
+        if value < 0 {
+            return Self::from_u32(value.unsigned_abs()).map(TypeSignature::ValueType);
+        }
+        Ok(TypeSignature::Index(value as u32))
     }
 }
 

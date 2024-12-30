@@ -15,7 +15,7 @@
 use crate::decode::{LabelId, Program, ScopeType};
 use crate::exec::{Fault, Value};
 use crate::stack::Stack;
-use crate::ValueType;
+use crate::{Type, ValueType};
 
 pub struct Frame {
     pub locals: Vec<Value>,
@@ -27,7 +27,7 @@ pub struct Frame {
 }
 
 pub struct Control {
-    pub signature: ValueType,
+    pub signature: Type,
     pub scope_type: ScopeType,
     pub stack_width: usize,
     pub label: LabelId,
@@ -46,7 +46,7 @@ impl Frame {
         }
     }
 
-    pub fn push_control(&mut self, signature: ValueType, scope_type: ScopeType, label: LabelId) {
+    pub fn push_control(&mut self, signature: Type, scope_type: ScopeType, label: LabelId) {
         self.control_stack.push(Control {
             signature,
             scope_type,
@@ -55,17 +55,29 @@ impl Frame {
         });
     }
 
-    pub fn pop_control(&mut self) -> Result<(Control, Option<Value>), Fault> {
+    pub fn pop_control(&mut self) -> Result<(Control, Vec<Value>), Fault> {
         let c = self
             .control_stack
             .pop()
             .ok_or(Fault::ControlStackUnderflow)?;
         self.stack.shrink_to(c.stack_width);
-        if c.signature != ValueType::Unit {
-            let value = Value::pop_from(c.signature, &mut self.stack)?;
-            Ok((c, Some(value)))
-        } else {
-            Ok((c, None))
+        match &c.signature {
+            Type::ValueType(vt) => {
+                if *vt != ValueType::Unit {
+                    let value = Value::pop_from(*vt, &mut self.stack)?;
+                    Ok((c, vec![value]))
+                } else {
+                    Ok((c, vec![]))
+                }
+            }
+            Type::FunctionType(ft) => {
+                // pop the return values from the stack
+                let mut results = vec![];
+                for vt in &ft.results {
+                    results.push(Value::pop_from(*vt, &mut self.stack)?);
+                }
+                Ok((c, results))
+            }
         }
     }
 
