@@ -62,8 +62,9 @@ impl Stack {
     }
 
     pub fn push_f32(&mut self, value: f32) {
-        let value = value as f64;
-        self.data.push(value.to_bits());
+        let bits = value.to_bits();
+        let value = bits as u64;
+        self.data.push(value);
     }
 
     pub fn push_f64(&mut self, value: f64) {

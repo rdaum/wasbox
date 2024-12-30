@@ -251,12 +251,12 @@ where
             Op::LoadF32(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
                 let value = memory.get_f32(addr)?;
-                frame.stack.push_u32(value.to_bits());
+                frame.stack.push_f32(value);
             }
             Op::LoadF64(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
                 let value = memory.get_f64(addr)?;
-                frame.stack.push_u64(value.to_bits());
+                frame.stack.push_f64(value);
             }
 
             // Extending load, signed
@@ -944,10 +944,12 @@ where
 }
 
 fn adjust_memarg(stack: &mut Stack, memarg: &MemArg) -> Result<usize, Fault> {
-    let i = stack.pop_i32()? as usize;
+    let base_addr = stack.pop_i32()? as usize;
 
-    // TODO: handle align
-    Ok(memarg.offset + i)
+    // Note: Alignment is only a "hint", we could issue a warning here, but that would just slow
+    //  down the interpreter.
+
+    Ok(memarg.offset + base_addr)
 }
 
 #[derive(Debug, Clone)]

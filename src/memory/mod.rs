@@ -96,31 +96,15 @@ pub trait Memory {
         ]))
     }
     fn get_f32(&self, offset: usize) -> Result<f32, Fault> {
-        if offset + 4 > self.size() {
-            return Err(Fault::MemoryOutOfBounds);
-        }
-        Ok(f32::from_le_bytes([
-            self.data()[offset],
-            self.data()[offset + 1],
-            self.data()[offset + 2],
-            self.data()[offset + 3],
-        ]))
+        let u = self.get_u32(offset)?;
+        Ok(f32::from_bits(u))
     }
+
     fn get_f64(&self, offset: usize) -> Result<f64, Fault> {
-        if offset + 8 > self.size() {
-            return Err(Fault::MemoryOutOfBounds);
-        }
-        Ok(f64::from_le_bytes([
-            self.data()[offset],
-            self.data()[offset + 1],
-            self.data()[offset + 2],
-            self.data()[offset + 3],
-            self.data()[offset + 4],
-            self.data()[offset + 5],
-            self.data()[offset + 6],
-            self.data()[offset + 7],
-        ]))
+        let u = self.get_u64(offset)?;
+        Ok(f64::from_bits(u))
     }
+
     fn set_u8(&mut self, offset: usize, value: u8) -> Result<(), Fault> {
         if offset >= self.size() {
             return Err(Fault::MemoryOutOfBounds);
@@ -190,29 +174,12 @@ pub trait Memory {
         Ok(())
     }
     fn set_f32(&mut self, offset: usize, value: f32) -> Result<(), Fault> {
-        if offset + 4 > self.size() {
-            return Err(Fault::MemoryOutOfBounds);
-        }
-        let le = value.to_le_bytes();
-        self.data_mut()[offset] = le[0];
-        self.data_mut()[offset + 1] = le[1];
-        self.data_mut()[offset + 2] = le[2];
-        self.data_mut()[offset + 3] = le[3];
-        Ok(())
+        let value = value.to_bits();
+        self.set_u32(offset, value)
     }
+
     fn set_f64(&mut self, offset: usize, value: f64) -> Result<(), Fault> {
-        if offset + 8 > self.size() {
-            return Err(Fault::MemoryOutOfBounds);
-        }
-        let le = value.to_le_bytes();
-        self.data_mut()[offset] = le[0];
-        self.data_mut()[offset + 1] = le[1];
-        self.data_mut()[offset + 2] = le[2];
-        self.data_mut()[offset + 3] = le[3];
-        self.data_mut()[offset + 4] = le[4];
-        self.data_mut()[offset + 5] = le[5];
-        self.data_mut()[offset + 6] = le[6];
-        self.data_mut()[offset + 7] = le[7];
-        Ok(())
+        let value = value.to_bits();
+        self.set_u64(offset, value)
     }
 }

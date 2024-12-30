@@ -250,7 +250,8 @@ mod tests {
                         {
                             assert!(
                                 expected.eq_w_nan(actual),
-                                "Mismatch at index {}: expected {:?}, got {:?} for directive #{directive_num} @ {linecol:?}",
+                                "Invoke: {}: Mismatch at index {}: expected {:?}, got {:?} for directive #{directive_num} @ {linecol:?}",
+                                name,
                                 i,
                                 expected,
                                 actual
@@ -264,7 +265,16 @@ mod tests {
                     message,
                     ..
                 } => {
-                    execution = TestModule::load(&module.encode().unwrap());
+                    let encoding = module.encode();
+                    // WAST parser itself will toss certain malformed modules, which sorta defeats
+                    // the purpose of this test, since it's just validating the encoder?
+                    let encoding = match encoding {
+                        Ok(e) => e,
+                        Err(_r) => {
+                            continue;
+                        }
+                    };
+                    execution = TestModule::load(&encoding);
                     // There has to be a LoadFailed or LinkError for this to be malformed.
                     match execution {
                         TestModule::LoadFailed(_) | TestModule::LinkFailed(_) => {
@@ -290,6 +300,17 @@ mod tests {
     #[test]
     fn binary_test() {
         let path = Path::new("tests/testsuite/binary.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn align_test() {
+        let path = Path::new("tests/testsuite/align.wast");
+        perform_wast(path);
+    }
+    #[test]
+    fn data_test() {
+        let path = Path::new("tests/testsuite/data.wast");
         perform_wast(path);
     }
 }
