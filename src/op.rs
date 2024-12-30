@@ -206,6 +206,14 @@ pub enum Op {
     F32Max,
     F32Copysign,
 
+    F64Add,
+    F64Sub,
+    F64Mul,
+    F64Div,
+    F64Min,
+    F64Max,
+    F64Copysign,
+
     F64Abs,
     F64Neg,
     F64Ceil,

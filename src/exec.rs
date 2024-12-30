@@ -789,6 +789,41 @@ where
                 let a = frame.stack.pop_f32()?;
                 frame.stack.push_f32(a.copysign(b));
             }
+            Op::F64Add => {
+                let b = frame.stack.pop_f64()?;
+                let a = frame.stack.pop_f64()?;
+                frame.stack.push_f64(a + b);
+            }
+            Op::F64Sub => {
+                let b = frame.stack.pop_f64()?;
+                let a = frame.stack.pop_f64()?;
+                frame.stack.push_f64(a - b);
+            }
+            Op::F64Mul => {
+                let b = frame.stack.pop_f64()?;
+                let a = frame.stack.pop_f64()?;
+                frame.stack.push_f64(a * b);
+            }
+            Op::F64Div => {
+                let b = frame.stack.pop_f64()?;
+                let a = frame.stack.pop_f64()?;
+                frame.stack.push_f64(a / b);
+            }
+            Op::F64Min => {
+                let b = frame.stack.pop_f64()?;
+                let a = frame.stack.pop_f64()?;
+                frame.stack.push_f64(a.min(b));
+            }
+            Op::F64Max => {
+                let b = frame.stack.pop_f64()?;
+                let a = frame.stack.pop_f64()?;
+                frame.stack.push_f64(a.max(b));
+            }
+            Op::F64Copysign => {
+                let b = frame.stack.pop_f64()?;
+                let a = frame.stack.pop_f64()?;
+                frame.stack.push_f64(a.copysign(b));
+            }
             Op::F64Abs => {
                 let value = frame.stack.pop_f64()?;
                 frame.stack.push_f64(value.abs());

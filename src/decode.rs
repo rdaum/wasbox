@@ -764,6 +764,27 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
             OpCode::F64Sqrt => {
                 prg.push(Op::F64Sqrt);
             }
+            OpCode::F64Add => {
+                prg.push(Op::F64Add);
+            }
+            OpCode::F64Sub => {
+                prg.push(Op::F64Sub);
+            }
+            OpCode::F64Mul => {
+                prg.push(Op::F64Mul);
+            }
+            OpCode::F64Div => {
+                prg.push(Op::F64Div);
+            }
+            OpCode::F64Min => {
+                prg.push(Op::F64Min);
+            }
+            OpCode::F64Max => {
+                prg.push(Op::F64Max);
+            }
+            OpCode::F64Copysign => {
+                prg.push(Op::F64Copysign);
+            }
             OpCode::I32WrapI64 => {
                 prg.push(Op::I32WrapI64);
             }

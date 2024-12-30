@@ -227,6 +227,13 @@ pub enum OpCode {
     F64Nearest = 0x9E,
     F64Sqrt = 0x9F,
 
+    F64Add = 0xA0,
+    F64Sub = 0xA1,
+    F64Mul = 0xA2,
+    F64Div = 0xA3,
+    F64Min = 0xA4,
+    F64Max = 0xA5,
+    F64Copysign = 0xA6,
     I32WrapI64 = 0xA7,
     I32TruncF32S = 0xA8,
     I32TruncF32U = 0xA9,
