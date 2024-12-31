@@ -18,7 +18,7 @@ use crate::module::{
     MemorySection, ReferenceType, Region, SectionType, Table,
 };
 use crate::DecodeError::{FailedToDecode, InvalidDataSegmentType, MalformedMemory};
-use crate::LoaderError::DecoderError;
+use crate::LoaderError::{DecoderError, DuplicateSection, EmptySection};
 use crate::{DecodeError, FuncType, Global, LoaderError, Module, ValueType};
 
 pub const SECTION_ID_CUSTOM: u8 = 0;
@@ -115,25 +115,38 @@ impl Module {
         let mut element_segments = vec![];
         let mut start_function = None;
         let mut data_count = None;
+
+        let mut seen_sections = 0;
         while reader.remaining() > 0 {
             // Read the section ID
-            let section_type = reader.load_imm_u8().map_err(DecoderError)?;
+            let section_type_code = reader.load_imm_u8().map_err(DecoderError)?;
 
             // Read the section length
             let section_length = reader.load_imm_varuint32().map_err(DecoderError)?;
             let offset = reader.position();
 
-            let section_type = SectionType::from_u8(section_type)?;
+            let section_type = SectionType::from_u8(section_type_code)?;
+            if seen_sections & (1 << section_type_code) != 0 {
+                return Err(DuplicateSection(section_type));
+            }
+            seen_sections |= 1 << section_type_code;
 
             match section_type {
                 SectionType::Type => {
                     // Type section
                     let func_types = reader.load_imm_varuint32().map_err(DecoderError)?;
 
+                    if func_types == 0 {
+                        return Err(EmptySection(section_type));
+                    }
+
                     for _ in 0..func_types {
                         let func_type_marker = reader.load_imm_u8().map_err(DecoderError)?;
-                        assert_eq!(0x60, func_type_marker);
-
+                        if func_type_marker != 0x60 {
+                            return Err(DecoderError(FailedToDecode(
+                                "Function type marker must be 0x60".to_string(),
+                            )));
+                        }
                         let num_param_types = reader.load_imm_varuint32().map_err(DecoderError)?;
                         let mut params = Vec::with_capacity(num_param_types as usize);
                         for _ in 0..num_param_types {
@@ -176,6 +189,10 @@ impl Module {
                 SectionType::Code => {
                     // Code section
                     let num_functions = reader.load_imm_varuint32().map_err(DecoderError)?;
+
+                    if num_functions == 0 {
+                        return Err(EmptySection(section_type));
+                    }
                     for _ in 0..num_functions {
                         let mut code_size =
                             reader.load_imm_varuint32().map_err(DecoderError)? as usize;
@@ -211,6 +228,10 @@ impl Module {
                 SectionType::Import => {
                     // Import section
                     let num_imports = reader.load_imm_varuint32().map_err(DecoderError)?;
+
+                    if num_imports == 0 {
+                        return Err(EmptySection(section_type));
+                    }
                     for _ in 0..num_imports {
                         let module = reader.load_string().map_err(DecoderError)?;
                         let field = reader.load_string().map_err(DecoderError)?;
@@ -246,6 +267,11 @@ impl Module {
                 SectionType::Table => {
                     // Table section
                     let num_tables = reader.load_imm_varuint32().map_err(DecoderError)?;
+
+                    if num_tables == 0 {
+                        return Err(EmptySection(section_type));
+                    }
+
                     for _ in 0..num_tables {
                         let t = read_table(&mut reader)?;
 
@@ -411,6 +437,11 @@ impl Module {
                 SectionType::Memory => {
                     // Memory section
                     let num_memories = reader.load_imm_varuint32().map_err(DecoderError)?;
+
+                    if num_memories == 0 {
+                        return Err(EmptySection(section_type));
+                    }
+
                     for _ in 0..num_memories {
                         let limits = read_limits(&mut reader).map_err(DecoderError)?;
                         memories.push(MemorySection { limits });
@@ -419,6 +450,11 @@ impl Module {
                 SectionType::Global => {
                     // Global section
                     let num_globals = reader.load_imm_varuint32().map_err(DecoderError)?;
+
+                    if num_globals == 0 {
+                        return Err(EmptySection(section_type));
+                    }
+
                     for _ in 0..num_globals {
                         let ty = ValueType::read(&mut reader).map_err(DecoderError)?;
                         let mut_flag = reader.load_imm_u8().map_err(DecoderError)?;
@@ -429,6 +465,11 @@ impl Module {
                 }
                 SectionType::Data => {
                     let num_data = reader.load_imm_varuint32().map_err(DecoderError)?;
+
+                    if num_data == 0 {
+                        return Err(EmptySection(section_type));
+                    }
+
                     for _ in 0..num_data {
                         let memtype = reader.load_imm_varuint32().map_err(DecoderError)?;
                         let datum = match memtype {
@@ -461,6 +502,12 @@ impl Module {
                     }
                 }
                 SectionType::Start => {
+                    // If we already got a start-function, that's a problem.
+                    if start_function.is_some() {
+                        return Err(DecoderError(FailedToDecode(
+                            "Multiple start functions".to_string(),
+                        )));
+                    }
                     // "The start section has the id 8. It decodes into an optional start function that represents the
                     //  component of a module."
                     let funcidx = reader.load_imm_varuint32().map_err(DecoderError)?;
@@ -504,6 +551,16 @@ impl Module {
             )));
         }
 
+        // End of all 'code' segments must be an End opcode.
+        for c in &code {
+            let end = module_data[c.code.1 - 1];
+            if end != 0x0B {
+                return Err(DecoderError(FailedToDecode(
+                    "Code segment does not end with an 'end' opcode".to_string(),
+                )));
+            }
+        }
+
         // Data count must be equal to the number of data segments, if it's been specified
         if let Some(data_count) = data_count {
             if data_count != data.len() as u32 {
@@ -511,6 +568,11 @@ impl Module {
                     "Data count does not match the number of data segments".to_string(),
                 )));
             }
+        }
+
+        // If there's no memory declared, just create a single-page
+        if memories.is_empty() {
+            memories.push(MemorySection { limits: (1, None) });
         }
 
         Ok(Module {
@@ -657,7 +719,7 @@ mod tests {
             vec![Global {
                 ty: ValueType::I32,
                 mutable: false,
-                expr: (48, 51)
+                expr: (48, 52)
             }]
         );
 
@@ -665,7 +727,7 @@ mod tests {
         assert_eq!(
             program.data,
             vec![Data::Active {
-                expr: (196, 199),
+                expr: (196, 200),
                 data: (201, 211),
             }]
         );

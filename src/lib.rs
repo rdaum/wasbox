@@ -37,7 +37,7 @@ mod stack;
 
 pub use crate::decode::DecodeError;
 use crate::module::LEB128Reader;
-pub use exec::{ExecError, Execution, Value};
+pub use exec::{ExecError, Execution, ExecutionLimits, Fault, Value};
 pub use frame::Frame;
 pub use instance::LinkError;
 pub use instance::{mk_instance, Instance};
@@ -110,7 +110,9 @@ impl ValueType {
             return Ok(TypeSignature::ValueType(ValueType::Unit));
         }
         if value < 0 {
-            return Self::from_u32(value.unsigned_abs()).map(TypeSignature::ValueType);
+            let uint7_mask = 0x7f;
+            let code = value & uint7_mask;
+            return Self::from_u32(code as u32).map(TypeSignature::ValueType);
         }
         Ok(TypeSignature::Index(value as u32))
     }

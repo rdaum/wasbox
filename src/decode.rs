@@ -141,11 +141,14 @@ pub enum ScopeType {
 
 pub type LabelId = usize;
 
+#[derive(Debug, Clone, PartialEq)]
 struct Scope {
     scope_type: ScopeType,
     #[allow(dead_code)]
     signature: TypeSignature,
     label: LabelId,
+    // If there's an "end" vs an e.g. "else" label, we need to keep track of that.
+    end_label: Option<LabelId>,
 }
 
 impl Default for Program {
@@ -197,6 +200,7 @@ impl Labels {
             scope_type: ScopeType::Program,
             signature: TypeSignature::ValueType(ValueType::Unit),
             label,
+            end_label: None,
         }
     }
 
@@ -206,6 +210,7 @@ impl Labels {
             scope_type: ScopeType::Loop,
             signature,
             label,
+            end_label: None,
         }
     }
 
@@ -215,15 +220,18 @@ impl Labels {
             scope_type: ScopeType::Block,
             signature,
             label,
+            end_label: None,
         }
     }
 
     fn mk_if_else(&mut self, signature: TypeSignature) -> Scope {
         let label = self.new_unbound_label();
+        let else_label = self.new_unbound_label();
         Scope {
             scope_type: ScopeType::IfElse,
             signature,
             label,
+            end_label: Some(else_label),
         }
     }
 }
@@ -281,27 +289,42 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 assert_eq!(if_block.scope_type, ScopeType::IfElse);
 
                 // Push the Else opcode to jump to end of the if block if we hit this.
-                prg.push(Op::Else(if_block.label));
+                prg.push(Op::Else(
+                    if_block.end_label.expect("Else without end label"),
+                ));
 
-                // Bind if block label to the current position.
+                // Bind if block else-label to the current position, which is after the else, but
+                // before the end.
                 prg.labels.bind_label(if_block.label, prg.ops.len());
             }
             OpCode::End => {
-                let block = scope_stack.pop().unwrap();
+                let Some(block) = scope_stack.pop() else {
+                    return Err(DecodeError::FailedToDecode(
+                        "End opcode without a block on the stack".to_string(),
+                    ));
+                };
+
+                // If there's an unbound end-label, bind it to the current position.
+                if let Some(end_label) = block.end_label {
+                    prg.labels.bind_label(end_label, prg.ops.len());
+                }
+
+                // Always push an EndScope.
+                prg.push(Op::EndScope(block.scope_type));
 
                 // Bind to the end-label if not already bound.
                 if prg.labels.find_label(block.label).is_none() {
                     prg.labels.bind_label(block.label, prg.ops.len());
                 }
-
-                // Always push an EndScope.
-                prg.push(Op::EndScope(block.scope_type));
             }
 
             OpCode::Br => {
                 let depth = reader.load_imm_varuint32()?;
-                // Grab the scope at the given depth, and find the start label for it.
-                let label = scope_stack[scope_stack.len() - depth as usize - 1].label;
+                // Grab the scope at the given depth, and find the label for it.
+                let current_scope = scope_stack.last().ok_or(DecodeError::FailedToDecode(
+                    "Br without a block on the stack".to_string(),
+                ))?;
+                let label = current_scope.label;
                 prg.push(Op::Br(label));
             }
             OpCode::BrIf => {
@@ -327,10 +350,16 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 prg.push(Op::Call(index));
             }
             OpCode::CallIndirect => {
-                let index = reader.load_imm_varuint32()?;
-                let _table = reader.load_imm_varuint32()?;
-                assert_eq!(0, _table);
-                prg.push(Op::CallIndirect(index));
+                let typesig = reader.load_imm_varuint32()?;
+                let table = reader.load_imm_varuint32()?;
+                // ^ is assumed to always be 0 for now.
+                if table != 0 {
+                    return Err(DecodeError::FailedToDecode(format!(
+                        "Expected CallIndirect with func table 0x00, got {:#0x}",
+                        table
+                    )));
+                }
+                prg.push(Op::CallIndirect(typesig));
             }
             OpCode::Drop => {
                 prg.push(Op::Drop);
@@ -353,6 +382,10 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
             OpCode::GetGlobal => {
                 let index = reader.load_imm_varuint32()?;
                 prg.push(Op::GetGlobal(index));
+            }
+            OpCode::SetGlobal => {
+                let index = reader.load_imm_varuint32()?;
+                prg.push(Op::SetGlobal(index));
             }
             OpCode::LoadI32 => {
                 let memarg = read_memarg(&mut reader, 2)?;
@@ -944,6 +977,13 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 ));
             }
         }
+    }
+
+    // scope stack should be empty at the end of the program.
+    if !scope_stack.is_empty() {
+        return Err(DecodeError::FailedToDecode(
+            "Scope stack not empty".to_string(),
+        ));
     }
 
     Ok(prg)

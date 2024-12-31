@@ -55,30 +55,15 @@ impl Frame {
         });
     }
 
-    pub fn pop_control(&mut self) -> Result<(Control, Vec<Value>), Fault> {
-        let c = self
-            .control_stack
-            .pop()
-            .ok_or(Fault::ControlStackUnderflow)?;
-        self.stack.shrink_to(c.stack_width);
-        match &c.signature {
-            Type::ValueType(vt) => {
-                if *vt != ValueType::Unit {
-                    let value = Value::pop_from(*vt, &mut self.stack)?;
-                    Ok((c, vec![value]))
-                } else {
-                    Ok((c, vec![]))
-                }
-            }
-            Type::FunctionType(ft) => {
-                // pop the return values from the stack
-                let mut results = vec![];
-                for vt in &ft.results {
-                    results.push(Value::pop_from(*vt, &mut self.stack)?);
-                }
-                Ok((c, results))
-            }
-        }
+    pub fn pop_control(&mut self) -> Result<Control, Fault> {
+        let c = self.control_stack.pop().ok_or_else(|| {
+            println!("Control stack underflow");
+            Fault::ControlStackUnderflow
+        })?;
+        // Ensure that the stack is the same width as when the control frame was pushed, except
+        // for return values
+        self.control_stack.shrink_to(c.stack_width + 1);
+        Ok(c)
     }
 
     pub fn jump_label(&mut self, label_id: LabelId) -> bool {

@@ -16,8 +16,10 @@
 mod tests {
     use std::fmt::{Debug, Formatter};
     use std::path::Path;
+
     use wasbox::{
-        mk_instance, DecodeError, Execution, LinkError, LoaderError, Module, VectorMemory,
+        mk_instance, DecodeError, ExecError, Execution, ExecutionLimits, Fault, LinkError,
+        LoaderError, Module, VectorMemory,
     };
     use wast::core::{NanPattern, WastArgCore, WastRetCore};
     use wast::lexer::Lexer;
@@ -104,6 +106,10 @@ mod tests {
                     DecodeResult::Failure(LoaderError::DecoderError(
                         DecodeError::UnimplementedOpcode(_, _),
                     )) => {}
+                    // We tolerate duplicate or empty sections because those are actually expected
+                    // in some tests.
+                    DecodeResult::Failure(LoaderError::EmptySection(_))
+                    | DecodeResult::Failure(LoaderError::DuplicateSection(_)) => {}
                     DecodeResult::Failure(e) => {
                         failures.push((n, path.clone(), name, e, bin));
                     }
@@ -185,7 +191,11 @@ mod tests {
                 Ok(m) => match mk_instance(m) {
                     Ok(i) => {
                         let memory = i.memories[0].clone();
-                        TestModule::Loaded(Box::new(Execution::new(i, memory)))
+                        TestModule::Loaded(Box::new(Execution::new(
+                            i,
+                            memory,
+                            ExecutionLimits::default(),
+                        )))
                     }
                     Err(e) => TestModule::LinkFailed(e),
                 },
@@ -216,50 +226,64 @@ mod tests {
                         Ok(m) => match mk_instance(m) {
                             Ok(i) => {
                                 let memory = i.memories[0].clone();
-                                TestModule::Loaded(Box::new(Execution::new(i, memory)))
+                                TestModule::Loaded(Box::new(Execution::new(
+                                    i,
+                                    memory,
+                                    ExecutionLimits::default(),
+                                )))
                             }
                             Err(e) => TestModule::LinkFailed(e),
                         },
                         Err(e) => TestModule::LoadFailed(e),
                     };
                 }
-                WastDirective::AssertReturn { exec, results, .. } => match exec {
-                    // Invoke runs executions on the last loaded module.
-                    WastExecute::Invoke(WastInvoke {
-                        span: _,
-                        module: _,
-                        name,
-                        args,
-                    }) => {
-                        let TestModule::Loaded(ref mut execution) = execution else {
-                            panic!("Expected a loaded module for invocation @ {:?}", linecol);
-                        };
-                        let funcidx = execution
-                            .instance()
-                            .find_funcidx(name)
-                            .unwrap_or_else(|| panic!("Function not found: {:?}", name));
+                WastDirective::AssertReturn { exec, results, .. } => {
+                    match exec {
+                        // Invoke runs executions on the last loaded module.
+                        WastExecute::Invoke(WastInvoke {
+                            span: _,
+                            module: _,
+                            name,
+                            args,
+                        }) => {
+                            let TestModule::Loaded(ref mut execution) = execution else {
+                                panic!("Expected a loaded module for invocation @ {:?}; got {:?} instead", linecol, execution)
+                            };
+                            execution.reset_ticks();
+                            let funcidx = execution
+                                .instance()
+                                .find_funcidx(name)
+                                .unwrap_or_else(|| panic!("Function not found: {:?}", name));
 
-                        let arg_set: Vec<_> = args.iter().map(convert_value).collect();
-                        execution.prepare(funcidx, &arg_set).unwrap();
-                        execution.run().unwrap();
-                        let result = execution.result().unwrap();
+                            let arg_set: Vec<_> = args.iter().map(convert_value).collect();
+                            eprintln!("Invoke: {}: {:?}", name, arg_set);
+                            execution.prepare(funcidx, &arg_set).unwrap();
+                            execution.run().unwrap_or_else(|e| {
+                                panic!(
+                                    "{:?}: Failed to run function: {:?} w/ args: {:?}: {e:?}",
+                                    linecol, name, arg_set
+                                )
+                            });
+                            let result = execution.result().unwrap();
 
-                        let expected_results: Vec<_> = results.iter().map(convert_ret).collect();
-                        for (i, (expected, actual)) in
-                            expected_results.iter().zip(result.iter()).enumerate()
-                        {
-                            assert!(
-                                expected.eq_w_nan(actual),
-                                "Invoke: {}: Mismatch at index {}: expected {:?}, got {:?} for directive #{directive_num} @ {linecol:?}",
-                                name,
-                                i,
-                                expected,
-                                actual
-                            );
+                            let expected_results: Vec<_> =
+                                results.iter().map(convert_ret).collect();
+                            for (i, (expected, actual)) in
+                                expected_results.iter().zip(result.iter()).enumerate()
+                            {
+                                assert!(
+                                    expected.eq_w_nan(actual),
+                                    "Invoke: {}: Mismatch at index {}: expected {:?}, got {:?} for directive #{directive_num} @ {linecol:?}",
+                                    name,
+                                    i,
+                                    expected,
+                                    actual
+                                );
+                            }
                         }
+                        _ => panic!("Unsupported exec directive: {:?} @ {:?}", exec, linecol),
                     }
-                    _ => panic!("Unsupported exec directive: {:?} @ {:?}", exec, linecol),
-                },
+                }
                 WastDirective::AssertMalformed {
                     mut module,
                     message,
@@ -286,6 +310,47 @@ mod tests {
                         ),
                     }
                 }
+                WastDirective::AssertExhaustion {
+                    call:
+                        WastInvoke {
+                            span: _,
+                            module: _,
+                            name,
+                            args,
+                        },
+                    message,
+                    ..
+                } => {
+                    let TestModule::Loaded(ref mut execution) = execution else {
+                        panic!(
+                            "Expected a loaded module for invocation @ {:?}; got {:?} instead",
+                            linecol, execution
+                        )
+                    };
+                    let funcidx = execution
+                        .instance()
+                        .find_funcidx(name)
+                        .unwrap_or_else(|| panic!("Function not found: {:?}", name));
+
+                    let arg_set: Vec<_> = args.iter().map(convert_value).collect();
+                    eprintln!("Invoke: {}: {:?}", name, arg_set);
+                    execution.prepare(funcidx, &arg_set).unwrap();
+                    let result = execution.run();
+                    match result {
+                        Err(ExecError::ExecutionFault(Fault::OutOfTicks(_, _))) => {
+                            // All good.
+                        }
+                        Err(ExecError::ExecutionFault(Fault::CallStackDepthLimit(_, _))) => {
+                            // All good.
+                        }
+                        _ => {
+                            panic!(
+                                    "Expected an exhaustion error w/ {message}, got {result:?} for directive #{directive_num} @ {:?}",
+                                    linecol,
+                                )
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -304,13 +369,50 @@ mod tests {
     }
 
     #[test]
+    fn call_test() {
+        let path = Path::new("tests/testsuite/call.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn call_indirect_test() {
+        let path = Path::new("tests/testsuite/call_indirect.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn br_tests() {
+        perform_wast(Path::new("tests/testsuite/br.wast"));
+        perform_wast(Path::new("tests/testsuite/br_if.wast"));
+        perform_wast(Path::new("tests/testsuite/br_table.wast"));
+    }
+
+    #[test]
     fn align_test() {
         let path = Path::new("tests/testsuite/align.wast");
         perform_wast(path);
     }
+
     #[test]
     fn data_test() {
         let path = Path::new("tests/testsuite/data.wast");
         perform_wast(path);
+    }
+
+    #[test]
+    fn float_tests() {
+        perform_wast(Path::new("tests/testsuite/f32.wast"));
+        perform_wast(Path::new("tests/testsuite/f64.wast"));
+    }
+
+    #[test]
+    fn int_tests() {
+        perform_wast(Path::new("tests/testsuite/i32.wast"));
+        perform_wast(Path::new("tests/testsuite/i64.wast"));
+    }
+
+    #[test]
+    fn loop_tests() {
+        perform_wast(Path::new("tests/testsuite/loop.wast"));
     }
 }

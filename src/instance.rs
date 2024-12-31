@@ -205,15 +205,10 @@ impl Instance {
             }
         }
         let funcidx = index - num_imported_funcs;
-        let typeindx = self.module.functions[funcidx as usize];
+        let func_type_idx = self.module.functions[funcidx as usize];
         // Types of arguments must match the function signature
-        for (i, (expected, actual)) in self.module.types[typeindx]
-            .params
-            .iter()
-            .zip(args.iter())
-            .enumerate()
-        {
-            // TODO: this doesn't seem to work with the itoa example?!
+        let param_types = &self.module.types[func_type_idx].params;
+        for (i, (expected, actual)) in param_types.iter().zip(args.iter()).enumerate() {
             if *expected != actual.type_of() {
                 return Err(LinkError::ArgumentTypeMismatch(
                     i,

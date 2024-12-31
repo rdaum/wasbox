@@ -37,6 +37,8 @@ pub enum LoaderError {
     MismatchedBlockStack,
     UnsupportedSectionType(SectionType),
     UnsupportedElementSegment(u8),
+    DuplicateSection(SectionType),
+    EmptySection(SectionType),
     DecoderError(DecodeError),
 }
 
@@ -56,6 +58,8 @@ impl Display for LoaderError {
             LoaderError::MismatchedBlockStack => write!(f, "Mismatched block stack"),
             LoaderError::InvalidReferenceType(t) => write!(f, "Invalid reference type: {}", t),
             LoaderError::InvalidImportType(t) => write!(f, "Invalid import type: {}", t),
+            LoaderError::DuplicateSection(t) => write!(f, "Duplicate section: {:?}", t),
+            LoaderError::EmptySection(t) => write!(f, "Empty section: {:?}", t),
             DecoderError(e) => write!(f, "Decode error: {}", e),
         }
     }
@@ -254,7 +258,7 @@ pub type Region = (usize, usize);
 
 impl Module {
     pub fn get_expr(&self, region: &Region) -> &[u8] {
-        assert_eq!(self.module_data[region.1], 0x0b);
+        assert_eq!(self.module_data[region.1 - 1], 0x0b);
         &self.module_data[region.0..region.1]
     }
 }

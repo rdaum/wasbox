@@ -14,34 +14,31 @@
 
 use crate::decode::scan;
 use crate::DecodeError;
-use std::io::{BufRead, Cursor, Read};
-use varint_rs::VarintReader;
+use wasabi_leb128::ReadLeb128;
 
 pub struct LEB128Reader<'a> {
-    cursor: Cursor<&'a [u8]>,
-    len: usize,
+    slice: &'a [u8],
+    position: usize,
 }
 
 impl<'a> LEB128Reader<'a> {
     pub fn new(slice: &'a [u8], start_position: usize) -> Self {
-        let mut cursor = Cursor::new(slice);
-        cursor.set_position(start_position as u64);
         Self {
-            cursor,
-            len: slice.len(),
+            slice,
+            position: start_position,
         }
     }
 
     pub fn remaining(&self) -> isize {
-        self.len as isize - self.cursor.position() as isize
+        self.slice.len() as isize - self.position as isize
     }
 
     pub fn position(&self) -> usize {
-        self.cursor.position() as usize
+        self.position
     }
 
     pub fn advance(&mut self, offset: usize) {
-        self.cursor.consume(offset);
+        self.position += offset;
     }
 }
 
@@ -57,91 +54,121 @@ impl LEB128Reader<'_> {
         // a block, loop, if, etc. and then manage the block stack accordingly.
         // And this also means not decoding arguments to instructions as instructions.
         // So really it's a full decode, but without the actual translation.
-        let start = self.cursor.position() as usize;
-
-        let end = scan(self)? - 1;
-
+        let start = self.position;
+        scan(self)?;
+        let end = self.position;
         Ok((start, end))
     }
 
     pub fn load_data(&mut self) -> Result<(usize, usize), DecodeError> {
         let length = self.load_imm_varuint32()? as usize;
-        let start = self.cursor.position() as usize;
+        let start = self.position;
         let end = start + length;
-        self.cursor.consume(length);
+        self.advance(length);
         Ok((start, end))
     }
 
     pub fn load_string(&mut self) -> Result<String, DecodeError> {
         let length = self.load_imm_varuint32()? as usize;
         let mut buffer = vec![0u8; length];
-        self.cursor.read_exact(&mut buffer).map_err(|_| {
-            DecodeError::MalformedMemory(format!(
-                "Failed to read string of length {} at offset {}",
-                length,
-                self.cursor.position()
-            ))
-        })?;
+        let read = self
+            .slice
+            .get(self.position..self.position + length)
+            .ok_or_else(|| {
+                DecodeError::MalformedMemory(format!(
+                    "Failed to read string of length {} at offset {}",
+                    length, self.position
+                ))
+            })?;
+        buffer.copy_from_slice(read);
+        self.advance(length);
         let string = String::from_utf8(buffer).map_err(|_| {
             DecodeError::MalformedMemory(format!(
                 "Failed to decode string of length {} at offset {}",
-                length,
-                self.cursor.position()
+                length, self.position
             ))
         })?;
         Ok(string)
     }
     pub fn load_imm_varuint32(&mut self) -> Result<u32, DecodeError> {
-        self.cursor.read_u32_varint().map_err(|_| {
+        let mut slice = &self.slice[self.position..];
+        let (value, bytes_read) = slice.read_leb128().map_err(|_| {
             DecodeError::MalformedMemory(format!(
                 "Failed to decode varuint32 at offset {}",
-                self.cursor.position()
+                self.position
             ))
-        })
+        })?;
+        self.advance(bytes_read);
+        Ok(value)
     }
 
     pub fn load_imm_varint32(&mut self) -> Result<i32, DecodeError> {
-        let value = self.load_imm_varuint32()?;
-        Ok(unsafe { std::mem::transmute::<u32, i32>(value) })
+        let mut slice = &self.slice[self.position..];
+        let (value, bytes_read): (i32, usize) = slice.read_leb128().map_err(|_| {
+            DecodeError::MalformedMemory(format!(
+                "Failed to decode varint32 at offset {}",
+                self.position
+            ))
+        })?;
+        self.advance(bytes_read);
+        Ok(value)
+    }
+
+    #[allow(dead_code)]
+    pub fn load_imm_varint8(&mut self) -> Result<i8, DecodeError> {
+        let mut slice = &self.slice[self.position..];
+        let (value, bytes_read): (i8, usize) = slice.read_leb128().map_err(|_| {
+            DecodeError::MalformedMemory(format!(
+                "Failed to decode varint8 at offset {}",
+                self.position
+            ))
+        })?;
+        self.advance(bytes_read);
+        Ok(value)
     }
 
     pub fn load_imm_varint64(&mut self) -> Result<i64, DecodeError> {
-        let value = self.load_imm_varuint64()?;
-        Ok(unsafe { std::mem::transmute::<u64, i64>(value) })
+        let mut slice = &self.slice[self.position..];
+        let (value, bytes_read): (i64, usize) = slice.read_leb128().map_err(|_| {
+            DecodeError::MalformedMemory(format!(
+                "Failed to decode varint64 at offset {}",
+                self.position
+            ))
+        })?;
+        self.advance(bytes_read);
+        Ok(value)
     }
 
     pub fn load_imm_varuint64(&mut self) -> Result<u64, DecodeError> {
-        self.cursor.read_u64_varint().map_err(|_| {
+        let mut slice = &self.slice[self.position..];
+        let (value, bytes_read) = slice.read_leb128().map_err(|_| {
             DecodeError::MalformedMemory(format!(
                 "Failed to decode varuint64 at offset {}",
-                self.cursor.position()
+                self.position
             ))
-        })
+        })?;
+        self.advance(bytes_read);
+        Ok(value)
     }
 
     pub fn load_imm_u8(&mut self) -> Result<u8, DecodeError> {
-        let byte: u8 = VarintReader::read(&mut self.cursor).map_err(|_| {
-            DecodeError::MalformedMemory(format!(
-                "Failed to decode u8 at offset {}",
-                self.cursor.position()
-            ))
+        let value = self.slice.get(self.position).ok_or_else(|| {
+            DecodeError::MalformedMemory(format!("Failed to decode u8 at offset {}", self.position))
         })?;
-        Ok(byte)
+        self.advance(1);
+        Ok(*value)
     }
     pub fn load_imm_f32(&mut self) -> Result<f32, DecodeError> {
         let mut f32_buffer = [0u8; 4];
-        self.cursor.read_exact(&mut f32_buffer).map_err(|_| {
-            DecodeError::MalformedMemory(format!(
-                "Failed to decode f32 at offset {}",
-                self.cursor.position()
-            ))
-        })?;
+        f32_buffer.copy_from_slice(&self.slice[self.position..self.position + 4]);
+        self.advance(4);
         Ok(f32::from_le_bytes(f32_buffer))
     }
 
     pub fn load_imm_f64(&mut self) -> f64 {
         let mut f64_buffer = [0u8; 8];
-        self.cursor.read_exact(&mut f64_buffer).unwrap();
+        f64_buffer.copy_from_slice(&self.slice[self.position..self.position + 8]);
+        self.advance(8);
         f64::from_le_bytes(f64_buffer)
     }
 

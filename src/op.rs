@@ -54,6 +54,7 @@ pub enum Op {
     SetLocal(u32),
     TeeLocal(u32),
     GetGlobal(u32),
+    SetGlobal(u32),
 
     // Loads.
     LoadI32(MemArg),
