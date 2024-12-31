@@ -196,18 +196,12 @@ where
                 let condition = frame.stack.pop_untyped()?;
                 // Walk back up the scope until we hit this label, and truncate back to that.
                 if condition != 0 {
-                    let pop_depth = frame
-                        .control_stack
-                        .iter()
-                        .rev()
-                        .position(|c| c.label == label)
-                        .unwrap();
-                    if pop_depth != 0 {
-                        for _ in 0..pop_depth - 1 {
-                            frame.pop_control()?;
+                    loop {
+                        let c = frame.pop_control()?;
+                        if c.label == label {
+                            break;
                         }
                     }
-
                     assert!(frame.jump_label(label));
                 }
             }

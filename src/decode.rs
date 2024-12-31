@@ -36,6 +36,7 @@ pub enum DecodeError {
     InvalidDataSegmentType(u32),
     UnsupportedType(u32, String),
     MalformedMemory(String),
+    BadControlStackScope,
 }
 
 impl Display for DecodeError {
@@ -61,6 +62,9 @@ impl Display for DecodeError {
             }
             DecodeError::MalformedMemory(reason) => {
                 write!(f, "Malformed memory: {}", reason)
+            }
+            DecodeError::BadControlStackScope => {
+                write!(f, "Bad control stack scope")
             }
         }
     }
@@ -285,12 +289,16 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
             }
             OpCode::Else => {
                 // The last block on the stack should be an IfBlock, otherwise that's corrupt program.
-                let if_block = scope_stack.last_mut().unwrap();
+                let if_block = scope_stack
+                    .last_mut()
+                    .ok_or(DecodeError::BadControlStackScope)?;
                 assert_eq!(if_block.scope_type, ScopeType::IfElse);
 
                 // Push the Else opcode to jump to end of the if block if we hit this.
                 prg.push(Op::Else(
-                    if_block.end_label.expect("Else without end label"),
+                    if_block
+                        .end_label
+                        .ok_or(DecodeError::BadControlStackScope)?,
                 ));
 
                 // Bind if block else-label to the current position, which is after the else, but
@@ -299,9 +307,7 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
             }
             OpCode::End => {
                 let Some(block) = scope_stack.pop() else {
-                    return Err(DecodeError::FailedToDecode(
-                        "End opcode without a block on the stack".to_string(),
-                    ));
+                    return Err(DecodeError::BadControlStackScope);
                 };
 
                 // If there's an unbound end-label, bind it to the current position.
@@ -321,9 +327,11 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
             OpCode::Br => {
                 let depth = reader.load_imm_varuint32()?;
                 // Grab the scope at the given depth, and find the label for it.
-                let current_scope = scope_stack.last().ok_or(DecodeError::FailedToDecode(
-                    "Br without a block on the stack".to_string(),
-                ))?;
+                let current_scope = scope_stack
+                    .iter()
+                    .rev()
+                    .nth(depth as usize)
+                    .ok_or(DecodeError::BadControlStackScope)?;
                 let label = current_scope.label;
                 prg.push(Op::Br(label));
             }
