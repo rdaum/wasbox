@@ -22,7 +22,7 @@ use std::fmt::{Debug, Display, Formatter};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub ops: Vec<Op>,
-    pub labels: Labels,
+    pub labels: Vec<Label>,
     pub local_types: Vec<ValueType>,
     pub return_types: Vec<ValueType>,
 }
@@ -101,37 +101,25 @@ fn read_memarg(reader: &mut LEB128Reader, max_align: u8) -> Result<MemArg, Decod
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Labels {
-    labels: Vec<Label>,
-}
-#[derive(Debug, Clone, PartialEq)]
-pub struct Label {
-    position: Option<usize>,
+pub enum Label {
+    Bound {
+        position: usize,
+        control_stack_depth: usize,
+    },
+    Unbound,
 }
 
 impl Label {
     fn new() -> Self {
-        Label { position: None }
-    }
-
-    fn bound(position: usize) -> Self {
-        Label {
-            position: Some(position),
-        }
-    }
-
-    fn bind(&mut self, position: usize) {
-        self.position = Some(position);
-    }
-
-    #[allow(dead_code)]
-    fn unbind(&mut self) {
-        self.position = None;
+        Label::Unbound
     }
 
     /// Return the position for a bound label
     pub fn position(&self) -> Option<usize> {
-        self.position
+        match self {
+            Label::Bound { position: pos, .. } => Some(*pos),
+            Label::Unbound => None,
+        }
     }
 }
 
@@ -165,7 +153,7 @@ impl Program {
     pub fn new() -> Self {
         Program {
             ops: vec![],
-            labels: Labels { labels: vec![] },
+            labels: vec![],
             local_types: vec![],
             return_types: vec![],
         }
@@ -174,13 +162,16 @@ impl Program {
     pub fn push(&mut self, op: Op) {
         self.ops.push(op);
     }
-}
 
-impl Labels {
-    pub fn new_bound_label(&mut self, pos: usize) -> LabelId {
-        let label = Label::bound(pos);
+    pub fn new_bound_label(&mut self, control_stack_depth: usize) -> LabelId {
+        let label_id = self.labels.len();
+        let pos = self.ops.len();
+        let label = Label::Bound {
+            position: pos,
+            control_stack_depth,
+        };
         self.labels.push(label);
-        (self.labels.len() - 1) as _
+        label_id
     }
 
     pub fn new_unbound_label(&mut self) -> LabelId {
@@ -189,20 +180,25 @@ impl Labels {
         (self.labels.len() - 1) as _
     }
 
-    pub fn bind_label(&mut self, label: LabelId, position: usize) {
-        assert!(self.labels[label].position.is_none());
-        self.labels[label].bind(position);
+    pub fn bind_label(&mut self, label: LabelId, control_stack_depth: usize) {
+        let Label::Unbound = self.labels[label] else {
+            panic!("Label already bound");
+        };
+        self.labels[label] = Label::Bound {
+            position: self.ops.len(),
+            control_stack_depth,
+        };
     }
 
-    pub fn find_label(&self, label: LabelId) -> Option<usize> {
-        self.labels[label].position()
+    pub fn find_label(&self, label: LabelId) -> Option<&Label> {
+        self.labels.get(label)
     }
 
-    fn mk_program(&mut self) -> Scope {
-        let label = self.new_bound_label(0);
+    fn mk_program(&mut self, control_stack_depth: usize, signature: TypeSignature) -> Scope {
+        let label = self.new_bound_label(control_stack_depth);
         Scope {
             scope_type: ScopeType::Program,
-            signature: TypeSignature::ValueType(ValueType::Unit),
+            signature,
             label,
             end_label: None,
         }
@@ -240,12 +236,14 @@ impl Labels {
     }
 }
 
-pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
+pub fn decode(program_stream: &[u8], return_type: TypeSignature) -> Result<Program, DecodeError> {
     let mut prg = Program::new();
     // The assumption is that program_stream is after locals, where the opcodes begin.
     let mut reader = LEB128Reader::new(program_stream, 0);
 
-    let mut scope_stack = vec![prg.labels.mk_program()];
+    let mut scope_stack = vec![prg.mk_program(0, return_type)];
+
+    prg.push(Op::StartScope(return_type, ScopeType::Program, 0));
 
     // Decode the raw program stream and translate it into our ADT Op
     while reader.remaining() != 0 {
@@ -264,21 +262,21 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
 
             OpCode::Block => {
                 let signature = ValueType::read_signature(&mut reader)?;
-                let block = prg.labels.mk_block(signature);
+                let block = prg.mk_block(signature);
                 let label = block.label;
                 scope_stack.push(block);
                 prg.push(Op::StartScope(signature, ScopeType::Block, label));
             }
             OpCode::Loop => {
                 let signature = ValueType::read_signature(&mut reader)?;
-                let block = prg.labels.mk_loop(signature);
+                let block = prg.mk_loop(signature);
+                prg.bind_label(block.label, scope_stack.len());
                 prg.push(Op::StartScope(signature, ScopeType::Loop, block.label));
-                prg.labels.bind_label(block.label, prg.ops.len());
                 scope_stack.push(block);
             }
             OpCode::If => {
                 let signature = ValueType::read_signature(&mut reader)?;
-                let block = prg.labels.mk_if_else(signature);
+                let block = prg.mk_if_else(signature);
 
                 prg.push(Op::StartScope(signature, ScopeType::IfElse, block.label));
 
@@ -302,42 +300,59 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 ));
 
                 // Bind if block else-label to the current position, which is after the else, but
-                // before the end.
-                prg.labels.bind_label(if_block.label, prg.ops.len());
+                // before the end-block
+                prg.bind_label(if_block.label, scope_stack.len());
             }
             OpCode::End => {
                 let Some(block) = scope_stack.pop() else {
                     return Err(DecodeError::BadControlStackScope);
                 };
 
-                // If there's an unbound end-label, bind it to the current position.
+                // If there's an unbound before-end-label, bind it to the current position.
                 if let Some(end_label) = block.end_label {
-                    prg.labels.bind_label(end_label, prg.ops.len());
+                    // we need to be 1-behind the current scope_stack.len() because if we jump
+                    // here we don't want to pop the end-scope we're about to push.
+                    prg.bind_label(end_label, scope_stack.len() + 1);
                 }
 
-                // Always push an EndScope.
+                // Always push an EndScope
                 prg.push(Op::EndScope(block.scope_type));
 
                 // Bind to the end-label if not already bound.
-                if prg.labels.find_label(block.label).is_none() {
-                    prg.labels.bind_label(block.label, prg.ops.len());
+                match prg.find_label(block.label) {
+                    Some(Label::Unbound) => {
+                        prg.bind_label(block.label, scope_stack.len());
+                    }
+                    None => {
+                        return Err(DecodeError::BadControlStackScope);
+                    }
+                    _ => {
+                        // already bound
+                    }
+                }
+
+                if block.scope_type == ScopeType::Program {
+                    assert_eq!(scope_stack.len(), 0);
+                    // We're done with the program.
+                    break;
                 }
             }
 
             OpCode::Br => {
                 let depth = reader.load_imm_varuint32()?;
                 // Grab the scope at the given depth, and find the label for it.
-                let current_scope = scope_stack
-                    .iter()
-                    .rev()
-                    .nth(depth as usize)
+                let br_scope = scope_stack
+                    .get(scope_stack.len() - depth as usize - 1)
                     .ok_or(DecodeError::BadControlStackScope)?;
-                let label = current_scope.label;
+                let label = br_scope.label;
                 prg.push(Op::Br(label));
             }
             OpCode::BrIf => {
                 let depth = reader.load_imm_varuint32()?;
-                let label = scope_stack[scope_stack.len() - depth as usize - 1].label;
+                let label = scope_stack
+                    .get(scope_stack.len() - depth as usize - 1)
+                    .ok_or(DecodeError::BadControlStackScope)?
+                    .label;
                 prg.push(Op::BrIf(label));
             }
             OpCode::BrTable => {

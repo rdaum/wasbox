@@ -12,7 +12,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-use crate::decode::{LabelId, Program, ScopeType};
+use crate::decode::{Label, LabelId, Program, ScopeType};
 use crate::exec::{Fault, Value};
 use crate::stack::Stack;
 use crate::{Type, ValueType};
@@ -47,10 +47,20 @@ impl Frame {
     }
 
     pub fn push_control(&mut self, signature: Type, scope_type: ScopeType, label: LabelId) {
+        eprintln!(
+            "Pushing control frame: {:?}, stack is width: {}",
+            scope_type,
+            self.stack.width()
+        );
+        let result_width = match &signature {
+            Type::ValueType(ValueType::Unit) => 0,
+            Type::ValueType(_) => 1,
+            Type::FunctionType(i) => i.results.len(),
+        };
         self.control_stack.push(Control {
             signature,
             scope_type,
-            stack_width: self.stack.width(),
+            stack_width: self.stack.width() + result_width,
             label,
         });
     }
@@ -60,21 +70,36 @@ impl Frame {
             println!("Control stack underflow");
             Fault::ControlStackUnderflow
         })?;
-        // Ensure that the stack is the same width as when the control frame was pushed, except
-        // for return values
-        self.control_stack.shrink_to(c.stack_width + 1);
+        eprintln!("Popped control frame: {:?}", c.scope_type);
+        // Ensure that the value stack is the same width as when the control frame was pushed.
+        self.stack.truncate(c.stack_width);
+        eprintln!("Stack now: {:?}", self.stack.data);
         Ok(c)
     }
 
     pub fn jump_label(&mut self, label_id: LabelId) -> bool {
         // Find the label in the program's label map
-        let label = self.program.labels.find_label(label_id);
+        let label = self.program.find_label(label_id).cloned();
         match label {
-            Some(position) => {
+            Some(Label::Bound {
+                position,
+                control_stack_depth,
+            }) => {
+                eprintln!(
+                    "Jumping to label, position: {}, target control_stack_depth: {}",
+                    position, control_stack_depth
+                );
                 self.pc = position;
+                // Pop the control stack until we reach the target depth
+                while self.control_stack.len() > control_stack_depth {
+                    self.pop_control().unwrap();
+                }
                 true
             }
-            None => false,
+            _ => {
+                println!("Unbound label: {:?}", label_id);
+                false
+            }
         }
     }
 

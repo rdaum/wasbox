@@ -156,53 +156,67 @@ where
         frame.pc += 1;
         let op = frame.program.ops[pc].clone();
 
+        eprintln!("Executing op: {:?}", op);
         match op {
             Op::Nop => {}
             Op::StartScope(sig, scope_type, label) => {
                 let resolved_type = resolve_type(types, sig)?;
                 frame.push_control(resolved_type, scope_type, label);
             }
-            Op::EndScope(c) => {
-                // If this is EndScope(Program), we need to preserve the stack for return value.
-                if let ScopeType::Program = &c {
-                    return Ok(Continuation::DoneReturn);
+            Op::EndScope(scope_type) => {
+                let popped_control = frame.pop_control()?;
+                assert_eq!(
+                    popped_control.scope_type, scope_type,
+                    "Expected end of control stack to be {:?}, but got {:?}",
+                    scope_type, popped_control.scope_type
+                );
+                if let ScopeType::Program = &scope_type {
+                    assert_eq!(
+                        popped_control.scope_type,
+                        ScopeType::Program,
+                        "Expected end of control stack to be program scope, but got {:?} from a stack of {:?}",
+                        popped_control.scope_type,
+                        frame.control_stack.len()
+                    );
+                    // We've reached the end of the program
+                    return Ok(Continuation::ProgramEnd);
                 }
-                frame.pop_control()?;
             }
             Op::If(else_label) => {
                 // Pop condition from stack, evaluate.
                 // Then attempt to jump to else_label if false. If that fails, jump to end_label.
                 let condition = frame.stack.pop_untyped()?;
                 if condition == 0 {
+                    eprintln!("Jumping to else label: {}", else_label);
                     assert!(frame.jump_label(else_label));
                 }
                 // Otherwise, we continue.
             }
             Op::Else(end_label) => {
                 // Jump to end_label
+                eprintln!("Jumping to end label: {}", end_label);
                 assert!(frame.jump_label(end_label));
             }
             Op::Br(label) => {
-                // Pop until we hit the label, then jump to it.
-                let label = loop {
-                    let c = frame.pop_control()?;
+                // Back track until we hit the label, then jump to it.
+                // The jump will pop the control stack for us.
+                for c in frame.control_stack.iter().rev() {
                     if c.label == label {
-                        break label;
+                        assert!(frame.jump_label(label));
+                        break;
                     }
-                };
-                assert!(frame.jump_label(label));
+                }
             }
             Op::BrIf(label) => {
                 let condition = frame.stack.pop_untyped()?;
                 // Walk back up the scope until we hit this label, and truncate back to that.
                 if condition != 0 {
-                    loop {
-                        let c = frame.pop_control()?;
+                    for c in frame.control_stack.iter().rev() {
                         if c.label == label {
+                            assert!(frame.jump_label(label));
                             break;
                         }
                     }
-                    assert!(frame.jump_label(label));
                 }
             }
             Op::BrTable(table, default) => {
@@ -1127,7 +1141,8 @@ impl Value {
 
 // For executing little fragments of code e.g. globals or data segments
 pub(crate) fn exec_fragment(program: &[u8], return_type: ValueType) -> Result<Value, Fault> {
-    let const_program = decode(program).map_err(|_| Fault::DecodeError)?;
+    let const_program =
+        decode(program, TypeSignature::ValueType(return_type)).map_err(|_| Fault::DecodeError)?;
     let return_types = vec![return_type];
     let mut global_exec_frame = Frame {
         locals: vec![Unit; 0],
@@ -1266,7 +1281,7 @@ where
             );
             match result {
                 Ok(Continuation::ProgramEnd) | Ok(Continuation::DoneReturn) => {
-                    let mut return_values = vec![];
+                    let mut return_values = Vec::with_capacity(top_frame.return_types.len());
                     // get the return results based on the return types
                     // Theses are in reverse order on the stack...
                     for rt in top_frame.return_types.iter().rev() {
@@ -1276,6 +1291,14 @@ where
                                 .map_err(ExecError::ExecutionFault)?,
                         ));
                     }
+                    // Stack should be empty now
+                    if top_frame.stack.width() != 0 {
+                        eprintln!(
+                            "Stack not empty after execution ({} items)",
+                            top_frame.stack.width()
+                        );
+                    }
+                    // assert_eq!(top_frame.stack.width(), 0);
                     self.frame_stack.pop();
                     if let Some(frame) = self.frame_stack.last_mut() {
                         for (_, v) in return_values.iter().rev() {

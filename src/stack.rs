@@ -46,7 +46,7 @@ impl Stack {
         self.data.len()
     }
 
-    pub fn shrink_to(&mut self, width: usize) {
+    pub fn truncate(&mut self, width: usize) {
         self.data.truncate(width);
     }
 }

@@ -17,7 +17,7 @@ use crate::exec::{exec_fragment, Fault, GlobalVar, Value};
 use crate::frame::Frame;
 use crate::module::Data;
 use crate::stack::Stack;
-use crate::{DecodeError, Module, ValueType, VectorMemory};
+use crate::{DecodeError, Module, TypeSignature, ValueType, VectorMemory};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -65,7 +65,6 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
 
     for (i, code) in module.code.iter().enumerate() {
         let program_memory = module.code(i);
-        let mut program = decode(program_memory).map_err(LinkError::DecodeError)?;
 
         // Make local types from function signatures + code local signatures
         let typeidx = module.functions[i];
@@ -78,8 +77,15 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
             local_types.push(*local_type);
         }
 
+        let return_types = &module.types[typeidx].results;
+        let type_sig = if return_types.len() == 1 {
+            TypeSignature::ValueType(return_types[0])
+        } else {
+            TypeSignature::Index(typeidx as u32)
+        };
+        let mut program = decode(program_memory, type_sig).map_err(LinkError::DecodeError)?;
         program.local_types = local_types;
-        program.return_types = module.types[typeidx].results.clone();
+        program.return_types = return_types.clone();
 
         programs.push(program);
     }
