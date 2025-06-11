@@ -1,3 +1,5 @@
+## *The VM is currently broken and I don't have time right now to fix it, this is not a usable project yet* ##
+
 ### wasbox
 
 This is a minimal and primitive WebAssembly virtual machine for running WASM modules in a sandboxed environment.
