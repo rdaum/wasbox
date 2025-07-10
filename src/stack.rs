@@ -12,11 +12,12 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-use crate::exec::Fault;
+use crate::exec::{Fault, Value};
 
 /// Entries in the stack are raw u64s and are interpreted as the appropriate type when popped.
 /// We could store `Value` here, but it doesn't have a u32/u64 variant, and all uses are explicitly
 /// already casting to the appropriate type, anyway, so no need packing/unpacking a variant everywhere.
+#[derive(Debug)]
 pub struct Stack {
     data: Vec<u64>,
 }
@@ -43,13 +44,11 @@ impl Stack {
 impl Stack {
     pub fn push_i32(&mut self, value: i32) {
         let value = value as i64;
-        self.data
-            .push(unsafe { std::mem::transmute::<i64, u64>(value) });
+        self.data.push(value as u64);
     }
 
     pub fn push_i64(&mut self, value: i64) {
-        self.data
-            .push(unsafe { std::mem::transmute::<i64, u64>(value) });
+        self.data.push(value as u64);
     }
 
     pub fn push_u32(&mut self, value: u32) {
@@ -76,21 +75,21 @@ impl Stack {
             .last()
             .cloned()
             .ok_or(Fault::StackUnderflow)
-            .map(|v| unsafe { std::mem::transmute(v as u32) })
+            .map(|v| v as u32 as i32)
     }
 
     pub fn pop_i32(&mut self) -> Result<i32, Fault> {
         self.data
             .pop()
             .ok_or(Fault::StackUnderflow)
-            .map(|v| unsafe { std::mem::transmute(v as u32) })
+            .map(|v| v as u32 as i32)
     }
 
     pub fn pop_i64(&mut self) -> Result<i64, Fault> {
         self.data
             .pop()
             .ok_or(Fault::StackUnderflow)
-            .map(|v| unsafe { std::mem::transmute(v) })
+            .map(|v| v as i64)
     }
 
     pub fn top_f32(&self) -> Result<f32, Fault> {
@@ -140,13 +139,19 @@ impl Stack {
             .last()
             .cloned()
             .ok_or(Fault::StackUnderflow)
-            .map(|v| unsafe { std::mem::transmute(v) })
+            .map(|v| v as i64)
     }
     pub fn pop_f64(&mut self) -> Result<f64, Fault> {
         self.data
             .pop()
             .ok_or(Fault::StackUnderflow)
             .map(f64::from_bits)
+    }
+
+    pub fn pop_value(&mut self) -> Result<Value, Fault> {
+        let raw = self.data.pop().ok_or(Fault::StackUnderflow)?;
+        // For now, assume it's an i32 (could be improved to track types)
+        Ok(Value::I32(raw as i32))
     }
 
     pub fn top_u64(&self) -> Result<u64, Fault> {

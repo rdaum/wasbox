@@ -45,18 +45,18 @@ impl Display for LoaderError {
         match self {
             LoaderError::InvalidMagicNumber => write!(f, "Invalid magic number"),
             LoaderError::InvalidVersion => write!(f, "Invalid version"),
-            LoaderError::InvalidSectionType(t) => write!(f, "Invalid section type: {}", t),
+            LoaderError::InvalidSectionType(t) => write!(f, "Invalid section type: {t}"),
             UnsupportedSectionType(t) => {
-                write!(f, "Unsupported section type: {:?}", t)
+                write!(f, "Unsupported section type: {t:?}")
             }
             LoaderError::UnsupportedElementSegment(k) => {
-                write!(f, "Unsupported element kind: {}", k)
+                write!(f, "Unsupported element kind: {k}")
             }
             LoaderError::InvalidInstruction => write!(f, "Invalid instruction"),
             LoaderError::MismatchedBlockStack => write!(f, "Mismatched block stack"),
-            LoaderError::InvalidReferenceType(t) => write!(f, "Invalid reference type: {}", t),
-            LoaderError::InvalidImportType(t) => write!(f, "Invalid import type: {}", t),
-            DecoderError(e) => write!(f, "Decode error: {}", e),
+            LoaderError::InvalidReferenceType(t) => write!(f, "Invalid reference type: {t}"),
+            LoaderError::InvalidImportType(t) => write!(f, "Invalid import type: {t}"),
+            DecoderError(e) => write!(f, "Decode error: {e}"),
         }
     }
 }
@@ -134,8 +134,8 @@ pub struct ExportEntry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Table {
-    ty: ReferenceType,
-    limits: (u32, Option<u32>),
+    pub ty: ReferenceType,
+    pub limits: (u32, Option<u32>),
 }
 
 /// Declaration of a memory section in the program.
@@ -192,17 +192,20 @@ pub struct Global {
     pub expr: Region,
 }
 
+#[derive(Debug)]
 pub enum ElementMode {
     Passive,
     Active { table_index: u32, expr: Region },
     Declarative,
 }
 
+#[derive(Debug)]
 pub enum Elements {
     Function(Vec<u32>),
     Expression(Vec<Region>),
 }
 
+#[derive(Debug)]
 pub struct ElementSegment {
     pub reftype: ReferenceType,
     pub elements: Elements,

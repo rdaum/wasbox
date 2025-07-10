@@ -22,7 +22,7 @@
 //!     Main opcode interpreter can be externally driven on a tick slice
 //!     Execution can be stopped and restarted
 //!     Entire engine / stack is both `Send` and serializable/deserializable
-//!     No SIMD, no Threads, No reference types proposal, no exceptions proposal, no tail call proposal
+//!     No SIMD, no Threads, no exceptions proposal, no tail call proposal
 //!          MAYBE GC proposal, but not sure yet
 
 mod decode;
@@ -40,7 +40,7 @@ use crate::module::LEB128Reader;
 pub use exec::{ExecError, Execution, Value};
 pub use frame::Frame;
 pub use instance::LinkError;
-pub use instance::{mk_instance, Instance};
+pub use instance::{mk_instance, Instance, TableInstance};
 pub use memory::{Memory, SliceMemory, VectorMemory};
 pub use module::{
     Code, Data, ElementMode, ElementSegment, Elements, Global, ImportExportKind, LoaderError,
@@ -81,10 +81,8 @@ impl ValueType {
     fn from_u32(value: u32) -> Result<Self, DecodeError> {
         match value {
             0x40 => Ok(ValueType::Unit),
-            0x70 | 0x6f => Err(DecodeError::UnsupportedType(
-                value,
-                "Reference types proposal unsupported".to_string(),
-            )),
+            0x70 => Ok(ValueType::FuncRef),
+            0x6f => Ok(ValueType::ExternRef),
             0x7F => Ok(ValueType::I32),
             0x7E => Ok(ValueType::I64),
             0x7D => Ok(ValueType::F32),
@@ -111,6 +109,10 @@ impl ValueType {
         }
         if value < 0 {
             return Self::from_u32(value.unsigned_abs()).map(TypeSignature::ValueType);
+        }
+        // Also check if it's a value type when interpreted as unsigned
+        if let Ok(vt) = Self::from_u32(value as u32) {
+            return Ok(TypeSignature::ValueType(vt));
         }
         Ok(TypeSignature::Index(value as u32))
     }

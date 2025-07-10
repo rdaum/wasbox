@@ -297,8 +297,7 @@ impl Module {
                                 let kind = reader.load_imm_u8().map_err(DecoderError)?;
                                 if kind != 0 {
                                     return Err(DecoderError(FailedToDecode(format!(
-                                        "Unsupported element kind: {}",
-                                        kind
+                                        "Unsupported element kind: {kind}"
                                     ))));
                                 }
                                 let num_func_indices =
@@ -319,8 +318,7 @@ impl Module {
                                 let kind = reader.load_imm_u8().map_err(DecoderError)?;
                                 if kind != 0 {
                                     return Err(DecoderError(FailedToDecode(format!(
-                                        "Unsupported element kind: {}",
-                                        kind
+                                        "Unsupported element kind: {kind}"
                                     ))));
                                 }
                                 let num_func_indices =
@@ -400,8 +398,7 @@ impl Module {
                             }
                             _ => {
                                 return Err(DecoderError(FailedToDecode(format!(
-                                    "Unsupported element segment flags: {}",
-                                    flags
+                                    "Unsupported element segment flags: {flags}"
                                 ))));
                             }
                         };

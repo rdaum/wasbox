@@ -58,8 +58,8 @@ pub enum OpCode {
 
     // Reference types proposal
     SelectT = 0x1C,
-    TableGet = 0x24,
-    TableSet = 0x25,
+    TableGet = 0x25,
+    TableSet = 0x26,
     RefNull = 0xD0,
     IsNull = 0xD1,
     RefFunc = 0xD2,
@@ -74,6 +74,7 @@ pub enum OpCode {
     SetLocal = 0x21,
     Tee = 0x22,
     GetGlobal = 0x23,
+    SetGlobal = 0x24,
 
     LoadI32 = 0x28,
     LoadI64 = 0x29,

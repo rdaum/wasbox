@@ -20,10 +20,18 @@ use crate::Memory;
 /// module is started.
 /// TODO: Reality is we could probably use some sort of Copy-on-Write strategy here, but for now we just
 ///   clone the memory.
-#[derive(Clone)]
 pub struct VectorMemory {
     max_bounds: Option<usize>,
     data: Vec<u8>,
+}
+
+impl Clone for VectorMemory {
+    fn clone(&self) -> Self {
+        VectorMemory {
+            max_bounds: self.max_bounds,
+            data: self.data.clone(),
+        }
+    }
 }
 
 impl VectorMemory {
