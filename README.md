@@ -1,51 +1,40 @@
-## *The VM is currently broken and I don't have time right now to fix it, this is not a usable project yet* ##
-
 ### wasbox
 
-This is a minimal and primitive WebAssembly virtual machine for running WASM modules in a sandboxed environment.
+A minimal WebAssembly virtual machine designed to be embedded within other Rust applications and runtimes.
 
-It is written from scratch in Rust and is designed to be as simple as possible, and to support a simplified API and
-workflow for some specific use cases I have in mind for my own projects.
+Written from scratch in Rust for scenarios where you need to run WASM modules as part of a larger system:
 
-In particular, I need a wasm runtime that can do the following for another project I'm working on:
+- Suspend and resume execution with serializable stack frames
+- `Send` across threads for multi-threaded host applications
+- Co-host multiple VMs within the same runtime
+- Easy binding to native functions and host services
+- Simple, understandable codebase without complex lifetimes
 
-- Be suspended and resumed at will, and the contents of stack frames easily serialized.
-- Be `Send` across threads.
-- Cooperate / interoperate with other VMs co-hosted in the same runtime
-- Easily bind to native functions and other services within that runtime.
-- Be easy to understand and modify by _me_.
-- No fancy stuff with funky lifetimes, just simple code being simple and living the simple life.
+I'm not focused on amazing performance, JITting, running big programs, WASI, fancy extensions or generally for running
+your dumb "smart contracts" - I'm just aiming for a simple solid VM for integrating bits of WASM execution into existing 
+tools and applications.
 
-I don't need it to be JIT-blazing fast, just reasonable. I don't need a pile of extensions yet. I don't need `wasi` and
-similar. I just want an embedded VM for running a subset of programs. And I banged my head against `wasmtime` and
-`wasmer`
-on and off for many months before just getting annoyed enough that I decided to try my hand at writing my own.
-
-**But you shouldn't use it. At least not yet.**
+**Work in progress - not ready for production use.**
 
 ### status
 
-It can currently do the following
+Recent work has implemented structured control flow and fixed major execution issues. Several fundamental WASM test
+suites now pass:
 
-- Decode (but not link or run) the entirety of the 'wast' test
-  suite (see `tests/testsuite`) into a Module structure
-- Scan and decode the core WASM opcodes into a set of stack-based VM
-  opcodes.
-- Execute said opcodes in stack frames that run against a `Memory`
-  which is for now a statically sized (un growable) slice.
-- Execute the above well enough to run the included `itoa`
-  function in `itoa.wat` / `itoa.wasm`. Produces the expected
-  results.
+- ✅ **i32/i64 operations** - arithmetic, comparison, bitwise ops
+- ✅ **local variables** - get/set/tee operations
+- ✅ **constants** - all constant value operations
+- ✅ **control flow** - if/else, block, loop, br/br_if/br_table
+- ✅ **function calls** - direct calls and basic call_indirect
+- ✅ **memory ops** - load/store for modules with memory
 
-Notably missing (and this is just the start of the list):
+Still missing (partial list):
 
-- Import binding. And likely a pile of of "link" time features.
-- Testing against anything other than "itoa". Will for _sure_ fail
-  on anything but the simplest programs right now as it likely has a
-  pile of bugs
-- Does not support vectors/simd, reference types, tables, GC
-  extensions, etc. etc. etc.
-- Optimization.
+- Import/export binding and linking features
+- Reference types, tables, SIMD, GC extensions
+- Many edge cases and complex control flow scenarios
+- F32 NaN handling and IEEE 754 compliance
+- Optimization and performance tuning
 
 ### license
 
