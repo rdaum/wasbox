@@ -38,7 +38,7 @@ mod tests {
         lexer.allow_confusing_unicode(path.ends_with("names.wast"));
         let pb = wast::parser::ParseBuffer::new_with_lexer(lexer).unwrap();
         let ast = parser::parse::<Wast>(&pb)
-            .unwrap_or_else(|_| panic!("Failed to parse WAST file {:?}", path));
+            .unwrap_or_else(|_| panic!("Failed to parse WAST file {path:?}"));
 
         let mut test_directives = vec![];
         let mut found_modules = vec![];
@@ -88,7 +88,7 @@ mod tests {
             attempts += 1;
             let entry = entry.unwrap();
             let path = entry.path();
-            if !path.extension().map_or(false, |ext| ext == "wast") {
+            if path.extension().is_none_or(|ext| ext != "wast") {
                 continue;
             }
             let results = module_decode(&path);
@@ -129,8 +129,10 @@ mod tests {
             WastArg::Core(WastArgCore::I64(i)) => wasbox::Value::I64(*i),
             WastArg::Core(WastArgCore::F32(f)) => wasbox::Value::F32(f32::from_bits(f.bits)),
             WastArg::Core(WastArgCore::F64(f)) => wasbox::Value::F64(f64::from_bits(f.bits)),
+            WastArg::Core(WastArgCore::RefExtern(r)) => wasbox::Value::ExternRef(Some(*r)),
+            WastArg::Core(WastArgCore::RefNull(_)) => wasbox::Value::ExternRef(None),
 
-            _ => panic!("Unsupported arg type"),
+            _ => panic!("Unsupported arg type: {v:?}"),
         }
     }
 
@@ -156,6 +158,8 @@ mod tests {
             WastRet::Core(WastRetCore::F64(NanPattern::CanonicalNan)) => {
                 wasbox::Value::F64(f64::NAN)
             }
+            WastRet::Core(WastRetCore::RefExtern(r)) => wasbox::Value::ExternRef(*r),
+            WastRet::Core(WastRetCore::RefNull(_)) => wasbox::Value::ExternRef(None),
             _ => panic!("Unsupported ret type"),
         }
     }
@@ -172,8 +176,8 @@ mod tests {
             match self {
                 TestModule::None => write!(f, "None"),
                 TestModule::Loaded(_) => write!(f, "Loaded"),
-                TestModule::LoadFailed(e) => write!(f, "LoadFailed({:?})", e),
-                TestModule::LinkFailed(e) => write!(f, "LinkFailed({:?})", e),
+                TestModule::LoadFailed(e) => write!(f, "LoadFailed({e:?})"),
+                TestModule::LinkFailed(e) => write!(f, "LinkFailed({e:?})"),
             }
         }
     }
@@ -184,7 +188,12 @@ mod tests {
             match m {
                 Ok(m) => match mk_instance(m) {
                     Ok(i) => {
-                        let memory = i.memories[0].clone();
+                        // Use first memory if available, otherwise create a dummy memory
+                        let memory = if !i.memories.is_empty() {
+                            i.memories[0].clone()
+                        } else {
+                            VectorMemory::new(0, None)
+                        };
                         TestModule::Loaded(Box::new(Execution::new(i, memory)))
                     }
                     Err(e) => TestModule::LinkFailed(e),
@@ -201,7 +210,7 @@ mod tests {
         let lexer = Lexer::new(&input);
         let pb = wast::parser::ParseBuffer::new_with_lexer(lexer).unwrap();
         let ast = parser::parse::<Wast>(&pb)
-            .unwrap_or_else(|_| panic!("Failed to parse WAST file {:?}", path));
+            .unwrap_or_else(|_| panic!("Failed to parse WAST file {path:?}"));
 
         let mut execution = TestModule::None;
         for (directive_num, directive) in ast.directives.into_iter().enumerate() {
@@ -215,12 +224,25 @@ mod tests {
                     execution = match m {
                         Ok(m) => match mk_instance(m) {
                             Ok(i) => {
-                                let memory = i.memories[0].clone();
+                                // Use first memory if available, otherwise create a dummy memory
+                                let memory = if !i.memories.is_empty() {
+                                    i.memories[0].clone()
+                                } else {
+                                    VectorMemory::new(0, None)
+                                };
                                 TestModule::Loaded(Box::new(Execution::new(i, memory)))
                             }
-                            Err(e) => TestModule::LinkFailed(e),
+                            Err(e) => {
+                                eprintln!("Link failed at directive #{directive_num} @ {linecol:?}: {e:?}");
+                                TestModule::LinkFailed(e)
+                            }
                         },
-                        Err(e) => TestModule::LoadFailed(e),
+                        Err(e) => {
+                            eprintln!(
+                                "Load failed at directive #{directive_num} @ {linecol:?}: {e:?}"
+                            );
+                            TestModule::LoadFailed(e)
+                        }
                     };
                 }
                 WastDirective::AssertReturn { exec, results, .. } => match exec {
@@ -232,12 +254,12 @@ mod tests {
                         args,
                     }) => {
                         let TestModule::Loaded(ref mut execution) = execution else {
-                            panic!("Expected a loaded module for invocation @ {:?}", linecol);
+                            panic!("Expected a loaded module for invocation @ {linecol:?}");
                         };
                         let funcidx = execution
                             .instance()
                             .find_funcidx(name)
-                            .unwrap_or_else(|| panic!("Function not found: {:?}", name));
+                            .unwrap_or_else(|| panic!("Function not found: {name:?}"));
 
                         let arg_set: Vec<_> = args.iter().map(convert_value).collect();
                         execution.prepare(funcidx, &arg_set).unwrap();
@@ -250,15 +272,11 @@ mod tests {
                         {
                             assert!(
                                 expected.eq_w_nan(actual),
-                                "Invoke: {}: Mismatch at index {}: expected {:?}, got {:?} for directive #{directive_num} @ {linecol:?}",
-                                name,
-                                i,
-                                expected,
-                                actual
+                                "Invoke: {name}: Mismatch at index {i}: expected {expected:?}, got {actual:?} for directive #{directive_num} @ {linecol:?}"
                             );
                         }
                     }
-                    _ => panic!("Unsupported exec directive: {:?} @ {:?}", exec, linecol),
+                    _ => panic!("Unsupported exec directive: {exec:?} @ {linecol:?}"),
                 },
                 WastDirective::AssertMalformed {
                     mut module,
@@ -281,8 +299,7 @@ mod tests {
                             // All good.
                         }
                         _ => panic!(
-                            "Expected a load error w/ {message}, got {execution:?} for directive #{directive_num} @ {:?}",
-                            linecol,
+                            "Expected a load error w/ {message}, got {execution:?} for directive #{directive_num} @ {linecol:?}",
                         ),
                     }
                 }
@@ -311,6 +328,96 @@ mod tests {
     #[test]
     fn data_test() {
         let path = Path::new("tests/testsuite/data.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn br_test() {
+        let path = Path::new("tests/testsuite/br.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn br_if_test() {
+        let path = Path::new("tests/testsuite/br_if.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn br_table_test() {
+        let path = Path::new("tests/testsuite/br_table.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn block_test() {
+        let path = Path::new("tests/testsuite/block.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn loop_test() {
+        let path = Path::new("tests/testsuite/loop.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn if_test() {
+        let path = Path::new("tests/testsuite/if.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn call_test() {
+        let path = Path::new("tests/testsuite/call.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn minimal_br_test() {
+        let path = Path::new("test_minimal.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn i32_test() {
+        let path = Path::new("tests/testsuite/i32.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn i64_test() {
+        let path = Path::new("tests/testsuite/i64.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn local_get_test() {
+        let path = Path::new("tests/testsuite/local_get.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn local_set_test() {
+        let path = Path::new("tests/testsuite/local_set.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn global_test() {
+        let path = Path::new("tests/testsuite/global.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn f32_test() {
+        let path = Path::new("tests/testsuite/f32.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn const_test() {
+        let path = Path::new("tests/testsuite/const.wast");
         perform_wast(path);
     }
 }
