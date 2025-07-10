@@ -12,16 +12,24 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-use crate::decode::{decode, Program};
+use crate::decode::{decode, Program, ScopeType};
 use crate::exec::{exec_fragment, Fault, GlobalVar, Value};
 use crate::frame::Frame;
-use crate::module::Data;
+use crate::module::{Data, ReferenceType};
 use crate::stack::Stack;
-use crate::{DecodeError, Module, ValueType, VectorMemory};
+use crate::{DecodeError, Module, Type, ValueType, VectorMemory};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 pub const WASM_PAGE_SIZE: usize = 1 << 16;
+
+/// Runtime representation of a table
+#[derive(Debug, Clone)]
+pub struct TableInstance {
+    pub elements: Vec<Option<Value>>,
+    pub ref_type: ReferenceType,
+    pub limits: (u32, Option<u32>),
+}
 
 #[derive(Debug)]
 pub enum LinkError {
@@ -36,16 +44,15 @@ pub enum LinkError {
 impl Display for LinkError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            LinkError::ActiveExpressionError(e) => write!(f, "Active expression error: {}", e),
+            LinkError::ActiveExpressionError(e) => write!(f, "Active expression error: {e}"),
             LinkError::FunctionNotFound => write!(f, "Function not found"),
-            LinkError::UnsupportedFeature(s) => write!(f, "Unsupported feature: {}", s),
+            LinkError::UnsupportedFeature(s) => write!(f, "Unsupported feature: {s}"),
             LinkError::ArgumentTypeMismatch(idx, expected, actual) => write!(
                 f,
-                "Argument type mismatch at index {}: expected {:?}, got {:?}",
-                idx, expected, actual
+                "Argument type mismatch at index {idx}: expected {expected:?}, got {actual:?}"
             ),
             LinkError::MissingMemory => write!(f, "No memory found"),
-            LinkError::DecodeError(e) => write!(f, "Decode error: {}", e),
+            LinkError::DecodeError(e) => write!(f, "Decode error: {e}"),
         }
     }
 }
@@ -57,6 +64,7 @@ pub struct Instance {
     pub memories: Vec<VectorMemory>,
     pub globals: Vec<GlobalVar>,
     pub programs: Vec<Program>,
+    pub tables: Vec<TableInstance>,
 }
 
 /// Produce an instance from a module.
@@ -90,8 +98,6 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
         .map(|m_decl| {
             let min_pages = m_decl.limits.0;
             let max_pages = m_decl.limits.1;
-            // We ignore the max_pages for now, we will need to get clever about using something
-            // other than a vec, etc. to handle this.
             VectorMemory::new(
                 min_pages as usize * WASM_PAGE_SIZE,
                 max_pages.map(|x| x as usize * WASM_PAGE_SIZE),
@@ -99,50 +105,87 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
         })
         .collect();
 
-    // Expectation is that there is only one memory for now.
-    if memories.is_empty() {
-        return Err(LinkError::MissingMemory);
+    // Initialize tables
+    let mut tables: Vec<_> = module
+        .tables
+        .iter()
+        .map(|t_decl| {
+            let min_size = t_decl.limits.0;
+            let max_size = t_decl.limits.1;
+            TableInstance {
+                elements: vec![None; min_size as usize],
+                ref_type: t_decl.ty,
+                limits: (min_size, max_size),
+            }
+        })
+        .collect();
+
+    // Apply active element segments to initialize tables
+    for element_segment in &module.element_segments {
+        if let crate::module::ElementMode::Active {
+            table_index,
+            expr: _,
+        } = &element_segment.mode
+        {
+            let table_idx = *table_index as usize;
+            if table_idx < tables.len() {
+                if let crate::module::Elements::Function(func_indices) = &element_segment.elements {
+                    // For now, assume offset is 0 (we're not evaluating the init expression)
+                    let offset = 0;
+                    for (i, &func_idx) in func_indices.iter().enumerate() {
+                        if offset + i < tables[table_idx].elements.len() {
+                            tables[table_idx].elements[offset + i] =
+                                Some(Value::FuncRef(Some(func_idx)));
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    // Support modules without memory
     if memories.len() > 1 {
         return Err(LinkError::UnsupportedFeature(
             "Multiple memories not supported yet".to_string(),
         ));
     }
 
-    // Populate memory from global data.
-    for data_segment in &module.data {
-        match data_segment {
-            Data::Active { expr, data } => {
-                // We have to execute the program located at expr in order to get the address
-                // of the data segment.
-                let data_offset = exec_fragment(module.get_expr(expr), ValueType::I32)
-                    .map_err(LinkError::ActiveExpressionError)?;
-                let Value::I32(data_offset) = data_offset else {
-                    panic!("Data segment offset must be i32");
-                };
-                let data_offset = data_offset as usize;
-                // Read from program memory @ data offset into memory_vec
-                let data_len = data.1 - data.0;
-                memories[0].data_mut()[data_offset..data_offset + data_len]
-                    .copy_from_slice(&module.module_data[data.0..data.1]);
-            }
-            Data::ActiveMemIdx { memidx, expr, data } => {
-                // This is identical to above but with a memory index set. But standard doesn't
-                // support multiple memories yet. But we'll just go ahead and implement it.
-                let data_offset = exec_fragment(module.get_expr(expr), ValueType::I32)
-                    .map_err(LinkError::ActiveExpressionError)?;
-                let Value::I32(data_offset) = data_offset else {
-                    panic!("Data segment offset must be i32");
-                };
-                let data_offset = data_offset as usize;
-                memories[*memidx as usize].data_mut()[data_offset..data_offset + data.1 - data.0]
-                    .copy_from_slice(&module.module_data[data.0..data.1]);
-            }
-            Data::Passive { data } => {
-                let offset = data.0;
-                let end = data.1;
-                memories[0].data_mut()[offset..end]
-                    .copy_from_slice(&module.module_data[offset..end]);
+    // Populate memory from global data (only if memory exists).
+    if !memories.is_empty() {
+        for data_segment in &module.data {
+            match data_segment {
+                Data::Active { expr, data } => {
+                    // We have to execute the program located at expr in order to get the address
+                    // of the data segment.
+                    let data_offset = exec_fragment(module.get_expr(expr), ValueType::I32)
+                        .map_err(LinkError::ActiveExpressionError)?;
+                    let Value::I32(data_offset) = data_offset else {
+                        panic!("Data segment offset must be i32");
+                    };
+                    let data_offset = data_offset as usize;
+                    // Read from program memory @ data offset into memory_vec
+                    let data_len = data.1 - data.0;
+                    memories[0].data_mut()[data_offset..data_offset + data_len]
+                        .copy_from_slice(&module.module_data[data.0..data.1]);
+                }
+                Data::ActiveMemIdx { memidx, expr, data } => {
+                    // This is identical to above but with a memory index set. But standard doesn't
+                    // support multiple memories yet. But we'll just go ahead and implement it.
+                    let data_offset = exec_fragment(module.get_expr(expr), ValueType::I32)
+                        .map_err(LinkError::ActiveExpressionError)?;
+                    let Value::I32(data_offset) = data_offset else {
+                        panic!("Data segment offset must be i32");
+                    };
+                    let data_offset = data_offset as usize;
+                    memories[*memidx as usize].data_mut()[data_offset..data_offset + data.1 - data.0]
+                        .copy_from_slice(&module.module_data[data.0..data.1]);
+                }
+                Data::Passive { data } => {
+                    let offset = data.0;
+                    let end = data.1;
+                    memories[0].data_mut()[offset..end]
+                        .copy_from_slice(&module.module_data[offset..end]);
+                }
             }
         }
     }
@@ -165,6 +208,7 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
         memories,
         globals,
         programs,
+        tables,
     })
 }
 
@@ -229,16 +273,47 @@ impl Instance {
         let program = &self.programs[index];
         let num_locals = program.local_types.len();
         let mut locals = args.to_vec();
-        locals.extend_from_slice(&vec![Value::Unit; num_locals - args.len()]);
+        
+        // Initialize remaining local variables to their zero values based on their types
+        for i in args.len()..num_locals {
+            let local_type = program.local_types[i];
+            let zero_value = match local_type {
+                ValueType::I32 => Value::I32(0),
+                ValueType::I64 => Value::I64(0),
+                ValueType::F32 => Value::F32(0.0),
+                ValueType::F64 => Value::F64(0.0),
+                ValueType::Unit => Value::Unit,
+                ValueType::V128 => Value::V128(0),
+                ValueType::FuncRef => Value::FuncRef(None),
+                ValueType::ExternRef => Value::ExternRef(None),
+            };
+            locals.push(zero_value);
+        }
+        
         let return_types = program.return_types.clone();
-        Ok(Frame {
+        let mut frame = Frame {
             locals,
             return_types,
             program: program.clone(),
             stack: Stack::new(),
             pc: 0,
             control_stack: vec![],
-        })
+        };
+
+        // Add function scope to control stack for proper branching
+        // The function signature for branching purposes uses the function's return type
+        let func_signature = if frame.return_types.is_empty() {
+            Type::ValueType(ValueType::Unit)
+        } else if frame.return_types.len() == 1 {
+            Type::ValueType(frame.return_types[0])
+        } else {
+            // For multiple return values, we'd need a function type, but for now assume single return
+            Type::ValueType(frame.return_types[0])
+        };
+
+        // Add function scope for proper control flow management
+        frame.push_control(func_signature, ScopeType::Function);
+        Ok(frame)
     }
 
     pub fn frame_for_funcname(&self, name: &str, args: &[Value]) -> Result<Frame, LinkError> {
