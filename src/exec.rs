@@ -14,7 +14,7 @@
 
 use crate::decode::{decode, ScopeType};
 use crate::frame::Frame;
-use crate::instance::{LinkError, WASM_PAGE_SIZE};
+use crate::instance::{LinkError, TableInstance, WASM_PAGE_SIZE};
 use crate::memory::Memory;
 use crate::memory::SliceMemory;
 use crate::module::Global;
@@ -64,14 +64,14 @@ impl Display for Fault {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Fault::OutOfTicks => write!(f, "Out of ticks"),
-            Fault::UnexpectedResult(c) => write!(f, "Unexpected result: {:?}", c),
+            Fault::UnexpectedResult(c) => write!(f, "Unexpected result: {c:?}"),
             Fault::StackUnderflow => write!(f, "Stack underflow"),
             Fault::ControlStackUnderflow => write!(f, "Control stack underflow"),
             Fault::LocalIndexOutOfBounds => write!(f, "Local index out of bounds"),
             Fault::GlobalIndexOutOfBounds => write!(f, "Global index out of bounds"),
             Fault::MemoryOutOfBounds => write!(f, "Memory out of bounds"),
             Fault::CannotGrowMemory => write!(f, "Cannot grow memory"),
-            Fault::UnresolvableTypeIndex(idx) => write!(f, "Unresolvable type index: {}", idx),
+            Fault::UnresolvableTypeIndex(idx) => write!(f, "Unresolvable type index: {idx}"),
         }
     }
 }
@@ -91,10 +91,127 @@ fn resolve_type(types: &[FuncType], ts: TypeSignature) -> Result<Type, Fault> {
     }
 }
 
+/// Unified branch execution using structured control flow
+fn execute_branch(frame: &mut Frame, depth: usize) -> Result<(), Fault> {
+    if depth >= frame.control_stack.len() {
+        return Err(Fault::ControlStackUnderflow);
+    }
+
+    // Find the target control block using WASM branch semantics
+    // All scopes are valid branch targets: Block, Loop, Function, and IfElse
+    let mut target_idx = None;
+
+    for (branch_target_count, (i, _control)) in frame.control_stack.iter().enumerate().rev().enumerate() {
+        // All control scopes are valid branch targets
+        if branch_target_count == depth {
+            target_idx = Some(i);
+            break;
+        }
+    }
+
+    let target_idx = target_idx.ok_or(Fault::ControlStackUnderflow)?;
+    let target_scope_type = frame.control_stack[target_idx].scope_type;
+    let pop_depth = match target_scope_type {
+        ScopeType::Loop => frame.control_stack.len() - 1 - target_idx, // Don't pop the loop
+        _ => frame.control_stack.len() - target_idx, // Pop the target block/function too
+    };
+
+    // Get the target control block's signature to know what values it expects
+    let target_signature = frame.control_stack[target_idx].signature.clone();
+    let target_stack_width = frame.control_stack[target_idx].stack_width;
+
+
+    // Pop the branch values from the stack (these will be provided to the target)
+    let branch_values = match &target_signature {
+        Type::ValueType(vt) => {
+            if *vt != ValueType::Unit && frame.stack.width() > 0 {
+                vec![Value::pop_from(*vt, &mut frame.stack)?]
+            } else {
+                vec![]
+            }
+        }
+        Type::FunctionType(ft) => {
+            // Pre-allocate and assign by index to avoid double-reverse
+            let mut branch_values = vec![Value::Unit; ft.results.len()];
+            for (i, vt) in ft.results.iter().enumerate().rev() {
+                branch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
+            }
+            branch_values
+        }
+    };
+
+    // Pop all the control blocks up to (but not including) the target
+    for _ in 0..pop_depth {
+        let _c = frame
+            .control_stack
+            .pop()
+            .ok_or(Fault::ControlStackUnderflow)?;
+    }
+
+    // Shrink stack to the target block's width
+    frame.stack.shrink_to(target_stack_width);
+
+    // Now provide the branch values to the target block
+    for value in branch_values {
+        value.push_to(&mut frame.stack);
+    }
+
+    // For structured control flow, we need to find where to jump based on scope type
+    match target_scope_type {
+        ScopeType::Function => {
+            // Branching to function scope means returning from the function
+            frame.pc = frame.program.ops.len(); // This will cause the main loop to exit
+        }
+        ScopeType::Loop => {
+            // For loops, branch to the beginning of the loop (where StartScope is)
+            // Scan backward to find the corresponding StartScope
+            let mut loop_depth = 0;
+            let mut target_pc = frame.pc;
+
+            for i in (0..frame.pc).rev() {
+                match &frame.program.ops[i] {
+                    Op::EndScope(ScopeType::Loop) => loop_depth += 1,
+                    Op::StartScope(_, ScopeType::Loop) if loop_depth == 0 => {
+                        target_pc = i + 1; // Jump to instruction after StartScope
+                        break;
+                    }
+                    Op::StartScope(_, ScopeType::Loop) => loop_depth -= 1,
+                    _ => {}
+                }
+            }
+            frame.pc = target_pc;
+        }
+        _ => {
+            // For Block, IfElse, Function: branch to the end (after EndScope)
+            // Since we've popped the target scope too, we need to find its EndScope
+            // The scope depth should account for the fact that we popped all intervening scopes AND the target
+            let mut scope_depth = pop_depth - 1; // -1 because we also popped the target
+
+            while frame.pc < frame.program.ops.len() {
+                match &frame.program.ops[frame.pc] {
+                    Op::StartScope(_, _) => scope_depth += 1,
+                    Op::EndScope(_) => {
+                        if scope_depth == 0 {
+                            frame.pc += 1; // Jump past the EndScope
+                            break;
+                        }
+                        scope_depth -= 1;
+                    }
+                    _ => {}
+                }
+                frame.pc += 1;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn execute<M>(
     frame: &mut Frame,
     memory: &mut M,
     globals: &mut [GlobalVar],
+    tables: &mut [TableInstance],
     max_ticks: usize,
     types: &[FuncType],
 ) -> Result<Continuation, Fault>
@@ -116,11 +233,12 @@ where
         frame.pc += 1;
         let op = frame.program.ops[pc].clone();
 
+
         match op {
             Op::Nop => {}
-            Op::StartScope(sig, scope_type, label) => {
+            Op::StartScope(sig, scope_type) => {
                 let resolved_type = resolve_type(types, sig)?;
-                frame.push_control(resolved_type, scope_type, label);
+                frame.push_control(resolved_type, scope_type);
             }
             Op::EndScope(c) => {
                 // If this is EndScope(Program), we need to preserve the stack for return value.
@@ -135,78 +253,105 @@ where
                     value.push_to(&mut frame.stack);
                 }
             }
-            Op::If(else_label) => {
+            Op::If => {
                 // Pop condition from stack, evaluate.
-                // Then attempt to jump to else_label if false. If that fails, jump to end_label.
                 let condition = frame.stack.pop_u32()?;
                 if condition == 0 {
-                    assert!(frame.jump_label(else_label));
-                }
-                // Otherwise, we continue.
-            }
-            Op::Else(end_label) => {
-                // Jump to end_label
-                assert!(frame.jump_label(end_label));
-            }
-            Op::Br(label) => {
-                let pop_depth = frame
-                    .control_stack
-                    .iter()
-                    .rev()
-                    .position(|c| c.label == label)
-                    .unwrap();
-                if pop_depth != 0 {
-                    for _ in 0..pop_depth - 1 {
-                        frame.pop_control()?;
-                    }
-                }
-                assert!(frame.jump_label(label));
-            }
-            Op::BrIf(label) => {
-                let condition = frame.stack.pop_u32()?;
-                // Walk back up the scope until we hit this label, and truncate back to that.
-                if condition != 0 {
-                    let pop_depth = frame
-                        .control_stack
-                        .iter()
-                        .rev()
-                        .position(|c| c.label == label)
-                        .unwrap();
-                    if pop_depth != 0 {
-                        for _ in 0..pop_depth - 1 {
-                            frame.pop_control()?;
-                        }
-                    }
+                    // Skip to else block or end of if - scan forward to find it
+                    let mut depth = 0;
+                    let _start_pc = frame.pc;
 
-                    assert!(frame.jump_label(label));
+                    while frame.pc < frame.program.ops.len() {
+                        match &frame.program.ops[frame.pc] {
+                            Op::StartScope(_, ScopeType::IfElse) => depth += 1,
+                            Op::Else if depth == 0 => {
+                                frame.pc += 1; // Move past the Else op
+                                break;
+                            }
+                            Op::EndScope(ScopeType::IfElse) if depth == 0 => {
+                                break; // No else block, go to end
+                            }
+                            Op::EndScope(ScopeType::IfElse) => depth -= 1,
+                            _ => {}
+                        }
+                        frame.pc += 1;
+                    }
+                } else {
+                    // Continue to then block (next instruction)
+                }
+            }
+            Op::Else => {
+                // Skip to end of if block - scan forward to find matching EndScope
+                let mut depth = 0;
+
+                while frame.pc < frame.program.ops.len() {
+                    match &frame.program.ops[frame.pc] {
+                        Op::StartScope(_, ScopeType::IfElse) => depth += 1,
+                        Op::EndScope(ScopeType::IfElse) if depth == 0 => {
+                            break; // Found the end of this if block
+                        }
+                        Op::EndScope(ScopeType::IfElse) => depth -= 1,
+                        _ => {}
+                    }
+                    frame.pc += 1;
+                }
+            }
+            Op::Br(depth) => {
+                execute_branch(frame, depth as usize)?;
+                continue;
+            }
+            Op::BrIf(depth) => {
+                let condition = frame.stack.pop_u32()?;
+                if condition != 0 {
+                    execute_branch(frame, depth as usize)?;
+                    continue;
                 }
             }
             Op::BrTable(table, default) => {
                 let index = frame.stack.pop_u32()? as usize;
-                let label = if index < table.len() {
+                let depth = if index < table.len() {
                     table[index]
                 } else {
                     default
-                };
-                assert!(frame.jump_label(label));
+                } as usize;
+
+                execute_branch(frame, depth)?;
+                continue;
             }
             Op::Return => {
-                // Pop all control stack, and exit.
-                while !frame.control_stack.is_empty() {
-                    frame.pop_control()?;
-                }
-                // Stack should contain the return value of the function, in the type of the function,
-                // which the caller knows, we don't make any assumptions about it.
+                // Return immediately from function - don't pop control blocks, just exit
+                // The stack should contain the return value(s) for the function
                 return Ok(Continuation::DoneReturn);
             }
             Op::Call(c) => {
                 return Ok(Continuation::Call(c));
             }
             Op::CallIndirect(_sig) => {
-                // In indirect, we pop the function index from the stack.
+                // In indirect, we pop the table index from the stack.
                 // TODO: do something with `sig` ?
-                let func_index = frame.stack.pop_u32()?;
-                return Ok(Continuation::Call(func_index));
+                let table_index = frame.stack.pop_u32()?;
+
+                // Look up the function reference in the table
+                if tables.is_empty() {
+                    return Err(Fault::MemoryOutOfBounds); // No tables available
+                }
+                let table = &tables[0]; // Assume table 0 for now
+
+                if table_index as usize >= table.elements.len() {
+                    return Err(Fault::MemoryOutOfBounds); // Table index out of bounds
+                }
+
+                match &table.elements[table_index as usize] {
+                    Some(Value::FuncRef(Some(func_index))) => {
+                        return Ok(Continuation::Call(*func_index));
+                    }
+                    Some(Value::FuncRef(None)) => {
+                        return Err(Fault::MemoryOutOfBounds); // Null function reference
+                    }
+                    _ => {
+                        return Err(Fault::MemoryOutOfBounds); // Invalid table element
+                    }
+                }
             }
             Op::Drop => {
                 frame.stack.pop_u32()?;
@@ -214,12 +359,12 @@ where
             Op::Select => {
                 //The select instruction returns its first operand if $condition is true, or its second operand otherwise.
                 let condition = frame.stack.pop_u32()?;
-                let a = frame.stack.pop_u32()?;
-                let b = frame.stack.pop_u32()?;
+                let val2 = frame.stack.pop_u32()?; // Second operand (popped first)
+                let val1 = frame.stack.pop_u32()?; // First operand (popped second)
                 if condition != 0 {
-                    frame.stack.push_u32(a);
+                    frame.stack.push_u32(val1); // Return first operand if condition is true
                 } else {
-                    frame.stack.push_u32(b);
+                    frame.stack.push_u32(val2); // Return second operand if condition is false
                 }
             }
             Op::GetLocal(idx) => {
@@ -237,6 +382,39 @@ where
                 }
                 let gv = &globals[g as usize];
                 gv.value.push_to(&mut frame.stack);
+            }
+            Op::SetGlobal(g) => {
+                if g as usize >= globals.len() {
+                    return Err(Fault::GlobalIndexOutOfBounds);
+                }
+                let value = Value::pop_from(globals[g as usize].decl.ty, &mut frame.stack)?;
+                globals[g as usize].value = value;
+            }
+            Op::TableGet(table_idx) => {
+                let idx = frame.stack.pop_u32()?;
+                if table_idx as usize >= tables.len() {
+                    return Err(Fault::GlobalIndexOutOfBounds);
+                }
+                let table = &tables[table_idx as usize];
+                if idx as usize >= table.elements.len() {
+                    return Err(Fault::MemoryOutOfBounds);
+                }
+                match &table.elements[idx as usize] {
+                    Some(value) => value.push_to(&mut frame.stack),
+                    None => frame.stack.push_u32(0), // null reference
+                }
+            }
+            Op::TableSet(table_idx) => {
+                let value = frame.stack.pop_value()?;
+                let idx = frame.stack.pop_u32()?;
+                if table_idx as usize >= tables.len() {
+                    return Err(Fault::GlobalIndexOutOfBounds);
+                }
+                let table = &mut tables[table_idx as usize];
+                if idx as usize >= table.elements.len() {
+                    return Err(Fault::MemoryOutOfBounds);
+                }
+                table.elements[idx as usize] = Some(value);
             }
             Op::LoadI32(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
@@ -381,8 +559,11 @@ where
                 if delta < 0 {
                     return Err(Fault::CannotGrowMemory);
                 }
-                let old_size = memory.grow(delta as usize)?;
-                frame.stack.push_i32(old_size as i32);
+                let current_size = memory.size();
+                let old_page_count = current_size / WASM_PAGE_SIZE;
+                let new_size = current_size + (delta as usize * WASM_PAGE_SIZE);
+                memory.grow(new_size)?;
+                frame.stack.push_i32(old_page_count as i32);
             }
             Op::I32Eqz => {
                 let value = frame.stack.pop_i32()?;
@@ -1000,6 +1181,8 @@ pub enum Value {
     F32(f32),
     F64(f64),
     V128(u128),
+    FuncRef(Option<u32>),
+    ExternRef(Option<u32>),
     Unit,
 }
 
@@ -1013,6 +1196,8 @@ impl Value {
             Value::F32(_) => ValueType::F32,
             Value::F64(_) => ValueType::F64,
             Value::V128(_) => ValueType::V128,
+            Value::FuncRef(_) => ValueType::FuncRef,
+            Value::ExternRef(_) => ValueType::ExternRef,
             Value::Unit => ValueType::Unit,
         }
     }
@@ -1031,8 +1216,8 @@ impl Value {
                 let (l, r) = (stack.pop_u64()?, stack.pop_u64()?);
                 Value::V128((r as u128) << 64 | l as u128)
             }
-            ValueType::FuncRef => unimplemented!("Function references not supported"),
-            ValueType::ExternRef => unimplemented!("Extern references not supported"),
+            ValueType::FuncRef => Value::FuncRef(Some(stack.pop_u32()?)),
+            ValueType::ExternRef => Value::ExternRef(Some(stack.pop_u32()?)),
         })
     }
 
@@ -1050,8 +1235,8 @@ impl Value {
                 let (l, r) = (stack.top_u64()?, stack.top_u64()?);
                 Value::V128((r as u128) << 64 | l as u128)
             }
-            ValueType::FuncRef => unimplemented!("Function references not supported"),
-            ValueType::ExternRef => unimplemented!("Extern references not supported"),
+            ValueType::FuncRef => Value::FuncRef(Some(stack.top_u32()?)),
+            ValueType::ExternRef => Value::ExternRef(Some(stack.top_u32()?)),
         })
     }
 
@@ -1065,6 +1250,8 @@ impl Value {
                 stack.push_u64(*v as u64);
                 stack.push_u64((*v >> 64) as u64);
             }
+            Value::FuncRef(v) => stack.push_u32(v.unwrap_or(0)),
+            Value::ExternRef(v) => stack.push_u32(v.unwrap_or(0)),
             Value::Unit => {
                 stack.push_u64(0);
             }
@@ -1114,10 +1301,12 @@ pub(crate) fn exec_fragment(program: &[u8], return_type: ValueType) -> Result<Va
 
     // In this case the expectation is we run out of instructions, and the stack contains the return
     // value.
+    let mut const_prg_tables = vec![];
     let result = execute(
         &mut global_exec_frame,
         &mut const_prg_memory,
         &mut const_prg_globals,
+        &mut const_prg_tables,
         EXPR_TICK_LIMIT,
         &[],
     )?;
@@ -1139,8 +1328,8 @@ pub enum ExecError {
 impl Display for ExecError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExecError::LinkageError(e) => write!(f, "Linkage error: {}", e),
-            ExecError::ExecutionFault(e) => write!(f, "Execution fault: {}", e),
+            ExecError::LinkageError(e) => write!(f, "Linkage error: {e}"),
+            ExecError::ExecutionFault(e) => write!(f, "Execution fault: {e}"),
         }
     }
 }
@@ -1190,6 +1379,8 @@ where
             .frame_for_funcidx(funcidx, args)
             .map_err(ExecError::LinkageError)?;
 
+        // TODO: Need to fix the label mismatch properly
+
         self.frame_stack.push(frame);
         Ok(())
     }
@@ -1201,19 +1392,19 @@ where
                 top_frame,
                 &mut self.memory,
                 &mut self.instance.globals,
+                &mut self.instance.tables,
                 10000,
                 &self.instance.module.types,
             );
             match result {
                 Ok(Continuation::ProgramEnd) | Ok(Continuation::DoneReturn) => {
-                    let mut return_values = vec![];
-                    // get the return results based on the return types
-                    for rt in top_frame.return_types.iter() {
-                        return_values.push((
-                            *rt,
-                            Value::pop_from(*rt, &mut top_frame.stack)
-                                .map_err(ExecError::ExecutionFault)?,
-                        ));
+                    // Stack is LIFO - pop values and assign to correct indices
+                    let mut return_values =
+                        vec![(ValueType::Unit, Value::Unit); top_frame.return_types.len()];
+                    for (i, rt) in top_frame.return_types.iter().enumerate().rev() {
+                        let value = Value::pop_from(*rt, &mut top_frame.stack)
+                            .map_err(ExecError::ExecutionFault)?;
+                        return_values[i] = (*rt, value);
                     }
                     self.frame_stack.pop();
                     if let Some(frame) = self.frame_stack.last_mut() {
@@ -1227,9 +1418,30 @@ where
                     }
                 }
                 Ok(Continuation::Call(funcidx)) => {
+                    // Get the function signature to know what arguments to pop from the stack
+                    let current_frame = self.frame_stack.last_mut().unwrap();
+
+                    // Look up the function signature
+                    let func_index = if funcidx < self.instance.module.functions.len() as u32 {
+                        funcidx
+                    } else {
+                        return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
+                    };
+
+                    let type_idx = self.instance.module.functions[func_index as usize];
+                    let func_type = &self.instance.module.types[type_idx];
+
+                    // Pop arguments from the current frame's stack
+                    let mut args = vec![Value::Unit; func_type.params.len()];
+                    for (i, param_type) in func_type.params.iter().enumerate().rev() {
+                        let value = Value::pop_from(*param_type, &mut current_frame.stack)
+                            .map_err(ExecError::ExecutionFault)?;
+                        args[i] = value;
+                    }
+
                     let frame = self
                         .instance
-                        .frame_for_funcidx(funcidx, &[])
+                        .frame_for_funcidx(funcidx, &args)
                         .map_err(ExecError::LinkageError)?;
                     self.frame_stack.push(frame);
                 }
