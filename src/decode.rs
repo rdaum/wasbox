@@ -22,7 +22,6 @@ use std::fmt::{Debug, Display, Formatter};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub ops: Vec<Op>,
-    pub labels: Labels,
     pub local_types: Vec<ValueType>,
     pub return_types: Vec<ValueType>,
 }
@@ -42,25 +41,25 @@ impl Display for DecodeError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             DecodeError::InvalidOpcode(opcode) => {
-                write!(f, "Invalid opcode: {:#0x}", opcode)
+                write!(f, "Invalid opcode: {opcode:#0x}")
             }
             DecodeError::UnimplementedOpcode(opcode, reason) => {
-                write!(f, "Unimplemented opcode: {:#0x} - {}", opcode, reason)
+                write!(f, "Unimplemented opcode: {opcode:#0x} - {reason}")
             }
             DecodeError::InvalidSignature(signature) => {
-                write!(f, "Invalid signature: {:#0x}", signature)
+                write!(f, "Invalid signature: {signature:#0x}")
             }
             DecodeError::FailedToDecode(reason) => {
-                write!(f, "Failed to decode: {}", reason)
+                write!(f, "Failed to decode: {reason}")
             }
             DecodeError::InvalidDataSegmentType(ty) => {
-                write!(f, "Invalid data segment type: {:#0x}", ty)
+                write!(f, "Invalid data segment type: {ty:#0x}")
             }
             DecodeError::UnsupportedType(ty, reason) => {
-                write!(f, "Unsupported type: {:#0x} - {}", ty, reason)
+                write!(f, "Unsupported type: {ty:#0x} - {reason}")
             }
             DecodeError::MalformedMemory(reason) => {
-                write!(f, "Malformed memory: {}", reason)
+                write!(f, "Malformed memory: {reason}")
             }
         }
     }
@@ -80,15 +79,13 @@ fn read_memarg(reader: &mut LEB128Reader, max_align: u8) -> Result<MemArg, Decod
 
     if offset > (MAX_MEMORY_OFFSET as u64) {
         return Err(DecodeError::MalformedMemory(format!(
-            "Offset too large: {:#0x}",
-            offset
+            "Offset too large: {offset:#0x}"
         )));
     }
     // check alignment
     if align > (max_align as u32) {
         return Err(DecodeError::MalformedMemory(format!(
-            "Invalid alignment: {:#0x}",
-            align
+            "Invalid alignment: {align:#0x}"
         )));
     }
 
@@ -96,56 +93,22 @@ fn read_memarg(reader: &mut LEB128Reader, max_align: u8) -> Result<MemArg, Decod
     Ok(MemArg { align, offset })
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Labels {
-    labels: Vec<Label>,
-}
-#[derive(Debug, Clone, PartialEq)]
-pub struct Label {
-    position: Option<usize>,
-}
-
-impl Label {
-    fn new() -> Self {
-        Label { position: None }
-    }
-
-    fn bound(position: usize) -> Self {
-        Label {
-            position: Some(position),
-        }
-    }
-
-    fn bind(&mut self, position: usize) {
-        self.position = Some(position);
-    }
-
-    #[allow(dead_code)]
-    fn unbind(&mut self) {
-        self.position = None;
-    }
-
-    /// Return the position for a bound label
-    pub fn position(&self) -> Option<usize> {
-        self.position
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ScopeType {
     Program,
+    Function,
     Loop,
     Block,
     IfElse,
 }
 
-pub type LabelId = usize;
-
 struct Scope {
     scope_type: ScopeType,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // May be used for future optimization
     signature: TypeSignature,
-    label: LabelId,
+    #[allow(dead_code)] // May be used for future optimization  
+    /// Position where this scope ends (for structured control flow)
+    end_position: Option<usize>,
 }
 
 impl Default for Program {
@@ -158,7 +121,6 @@ impl Program {
     pub fn new() -> Self {
         Program {
             ops: vec![],
-            labels: Labels { labels: vec![] },
             local_types: vec![],
             return_types: vec![],
         }
@@ -169,62 +131,49 @@ impl Program {
     }
 }
 
-impl Labels {
-    pub fn new_bound_label(&mut self, pos: usize) -> LabelId {
-        let label = Label::bound(pos);
-        self.labels.push(label);
-        (self.labels.len() - 1) as _
+fn mk_program() -> Scope {
+    Scope {
+        scope_type: ScopeType::Program,
+        signature: TypeSignature::ValueType(ValueType::Unit),
+        end_position: None,
     }
+}
 
-    pub fn new_unbound_label(&mut self) -> LabelId {
-        let label = Label::new();
-        self.labels.push(label);
-        (self.labels.len() - 1) as _
+fn mk_loop(signature: TypeSignature) -> Scope {
+    Scope {
+        scope_type: ScopeType::Loop,
+        signature,
+        end_position: None,
     }
+}
 
-    pub fn bind_label(&mut self, label: LabelId, position: usize) {
-        assert!(self.labels[label].position.is_none());
-        self.labels[label].bind(position);
+fn mk_block(signature: TypeSignature) -> Scope {
+    Scope {
+        scope_type: ScopeType::Block,
+        signature,
+        end_position: None,
     }
+}
 
-    pub fn find_label(&self, label: LabelId) -> Option<usize> {
-        self.labels[label].position()
+fn mk_if_else(signature: TypeSignature) -> Scope {
+    Scope {
+        scope_type: ScopeType::IfElse,
+        signature,
+        end_position: None,
     }
+}
 
-    fn mk_program(&mut self) -> Scope {
-        let label = self.new_bound_label(0);
-        Scope {
-            scope_type: ScopeType::Program,
-            signature: TypeSignature::ValueType(ValueType::Unit),
-            label,
-        }
-    }
-
-    fn mk_loop(&mut self, signature: TypeSignature) -> Scope {
-        let label = self.new_unbound_label();
-        Scope {
-            scope_type: ScopeType::Loop,
-            signature,
-            label,
-        }
-    }
-
-    fn mk_block(&mut self, signature: TypeSignature) -> Scope {
-        let label = self.new_unbound_label();
-        Scope {
-            scope_type: ScopeType::Block,
-            signature,
-            label,
-        }
-    }
-
-    fn mk_if_else(&mut self, signature: TypeSignature) -> Scope {
-        let label = self.new_unbound_label();
-        Scope {
-            scope_type: ScopeType::IfElse,
-            signature,
-            label,
-        }
+// Unused function - kept for potential future use
+#[allow(dead_code)]
+fn mk_function(return_types: Vec<ValueType>) -> Scope {
+    Scope {
+        scope_type: ScopeType::Function,
+        signature: TypeSignature::ValueType(if return_types.len() == 1 {
+            return_types[0]
+        } else {
+            ValueType::Unit // Multi-value returns need FunctionType handling
+        }),
+        end_position: None,
     }
 }
 
@@ -233,7 +182,7 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
     // The assumption is that program_stream is after locals, where the opcodes begin.
     let mut reader = LEB128Reader::new(program_stream, 0);
 
-    let mut scope_stack = vec![prg.labels.mk_program()];
+    let mut scope_stack = vec![mk_program()];
 
     // Decode the raw program stream and translate it into our ADT Op
     while reader.remaining() != 0 {
@@ -252,47 +201,35 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
 
             OpCode::Block => {
                 let signature = ValueType::read_signature(&mut reader)?;
-                let block = prg.labels.mk_block(signature);
-                let label = block.label;
+                let block = mk_block(signature);
                 scope_stack.push(block);
-                prg.push(Op::StartScope(signature, ScopeType::Block, label));
+                prg.push(Op::StartScope(signature, ScopeType::Block));
             }
             OpCode::Loop => {
                 let signature = ValueType::read_signature(&mut reader)?;
-                let block = prg.labels.mk_loop(signature);
-                prg.push(Op::StartScope(signature, ScopeType::Loop, block.label));
-                prg.labels.bind_label(block.label, prg.ops.len());
+                let block = mk_loop(signature);
+                prg.push(Op::StartScope(signature, ScopeType::Loop));
                 scope_stack.push(block);
             }
             OpCode::If => {
                 let signature = ValueType::read_signature(&mut reader)?;
-                let block = prg.labels.mk_if_else(signature);
+                let block = mk_if_else(signature);
 
-                prg.push(Op::StartScope(signature, ScopeType::IfElse, block.label));
-
-                // Emit If opcode with the start label bound, and unbound else and end label.
-                prg.push(Op::If(block.label));
+                prg.push(Op::StartScope(signature, ScopeType::IfElse));
+                prg.push(Op::If);
 
                 scope_stack.push(block);
             }
             OpCode::Else => {
                 // The last block on the stack should be an IfBlock, otherwise that's corrupt program.
-                let if_block = scope_stack.last_mut().unwrap();
+                let if_block = scope_stack.last().unwrap();
                 assert_eq!(if_block.scope_type, ScopeType::IfElse);
 
-                // Push the Else opcode to jump to end of the if block if we hit this.
-                prg.push(Op::Else(if_block.label));
-
-                // Bind if block label to the current position.
-                prg.labels.bind_label(if_block.label, prg.ops.len());
+                // No more implicit branches - just mark else position
+                prg.push(Op::Else);
             }
             OpCode::End => {
                 let block = scope_stack.pop().unwrap();
-
-                // Bind to the end-label if not already bound.
-                if prg.labels.find_label(block.label).is_none() {
-                    prg.labels.bind_label(block.label, prg.ops.len());
-                }
 
                 // Always push an EndScope.
                 prg.push(Op::EndScope(block.scope_type));
@@ -300,24 +237,19 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
 
             OpCode::Br => {
                 let depth = reader.load_imm_varuint32()?;
-                // Grab the scope at the given depth, and find the start label for it.
-                let label = scope_stack[scope_stack.len() - depth as usize - 1].label;
-                prg.push(Op::Br(label));
+                // Store the relative depth directly instead of converting to absolute label
+                prg.push(Op::Br(depth));
             }
             OpCode::BrIf => {
                 let depth = reader.load_imm_varuint32()?;
-                let label = scope_stack[scope_stack.len() - depth as usize - 1].label;
-                prg.push(Op::BrIf(label));
+                // Store the relative depth directly instead of converting to absolute label
+                prg.push(Op::BrIf(depth));
             }
             OpCode::BrTable => {
                 let depth_table = reader.load_array_varu32()?;
                 let default = reader.load_imm_varuint32()?;
-                let default = scope_stack[scope_stack.len() - default as usize - 1].label;
-                let labels_table = depth_table
-                    .iter()
-                    .map(|depth| scope_stack[scope_stack.len() - *depth as usize - 1].label)
-                    .collect();
-                prg.push(Op::BrTable(labels_table, default));
+                // Store the relative depths directly instead of converting to absolute labels
+                prg.push(Op::BrTable(depth_table, default));
             }
             OpCode::Return => {
                 prg.push(Op::Return);
@@ -353,6 +285,10 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
             OpCode::GetGlobal => {
                 let index = reader.load_imm_varuint32()?;
                 prg.push(Op::GetGlobal(index));
+            }
+            OpCode::SetGlobal => {
+                let index = reader.load_imm_varuint32()?;
+                prg.push(Op::SetGlobal(index));
             }
             OpCode::LoadI32 => {
                 let memarg = read_memarg(&mut reader, 2)?;
@@ -457,8 +393,7 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 let m_idx = reader.load_imm_u8()?;
                 if m_idx != 0x00 {
                     return Err(DecodeError::FailedToDecode(format!(
-                        "Expected GrowMemory 0x00, got {:#0x}",
-                        m_idx
+                        "Expected GrowMemory 0x00, got {m_idx:#0x}"
                     )));
                 }
                 prg.push(Op::MemorySize);
@@ -469,18 +404,17 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 let m_idx = reader.load_imm_u8()?;
                 if m_idx != 0x00 {
                     return Err(DecodeError::FailedToDecode(format!(
-                        "Expected GrowMemory 0x00, got {:#0x}",
-                        m_idx
+                        "Expected GrowMemory 0x00, got {m_idx:#0x}"
                     )));
                 }
                 prg.push(Op::MemoryGrow);
             }
             OpCode::I32Const => {
-                let value = reader.load_imm_varint32()?;
+                let value = reader.load_imm_signed_varint32()?;
                 prg.push(Op::I32Const(value));
             }
             OpCode::I64Const => {
-                let value = reader.load_imm_varint64()?;
+                let value = reader.load_imm_signed_varint64()?;
                 prg.push(Op::I64Const(value));
             }
             OpCode::F32Const => {
@@ -876,9 +810,15 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 prg.push(Op::I64Extend32S);
             }
 
+            OpCode::TableGet => {
+                let table_index = reader.load_imm_varuint32()?;
+                prg.push(Op::TableGet(table_index));
+            }
+            OpCode::TableSet => {
+                let table_index = reader.load_imm_varuint32()?;
+                prg.push(Op::TableSet(table_index));
+            }
             OpCode::SelectT
-            | OpCode::TableGet
-            | OpCode::TableSet
             | OpCode::RefNull
             | OpCode::IsNull
             | OpCode::RefFunc
@@ -985,7 +925,11 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
                 reader.load_array_varu32()?;
                 reader.load_imm_varuint32()?;
             }
-            OpCode::GetLocal | OpCode::SetLocal | OpCode::Tee | OpCode::GetGlobal => {
+            OpCode::GetLocal
+            | OpCode::SetLocal
+            | OpCode::Tee
+            | OpCode::GetGlobal
+            | OpCode::SetGlobal => {
                 reader.load_imm_varuint32()?;
             }
             OpCode::CurrentMemorySize | OpCode::GrowMemory => {
@@ -994,8 +938,7 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
                 let m_idx = reader.load_imm_u8()?;
                 if m_idx != 0x00 {
                     return Err(DecodeError::FailedToDecode(format!(
-                        "Expected GrowMemory 0x00, got {:#0x}",
-                        m_idx
+                        "Expected GrowMemory 0x00, got {m_idx:#0x}"
                     )));
                 }
             }
@@ -1027,10 +970,10 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
                 read_memarg(reader, 3)?;
             }
             OpCode::I32Const => {
-                reader.load_imm_varint32()?;
+                reader.load_imm_signed_varint32()?;
             }
             OpCode::I64Const => {
-                reader.load_imm_varint64()?;
+                reader.load_imm_signed_varint64()?;
             }
             OpCode::F32Const => {
                 reader.load_imm_f32()?;

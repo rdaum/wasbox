@@ -12,7 +12,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-use crate::decode::{LabelId, Program, ScopeType};
+use crate::decode::{Program, ScopeType};
 use crate::exec::{Fault, Value};
 use crate::stack::Stack;
 use crate::{Type, ValueType};
@@ -30,7 +30,6 @@ pub struct Control {
     pub signature: Type,
     pub scope_type: ScopeType,
     pub stack_width: usize,
-    pub label: LabelId,
 }
 
 impl Frame {
@@ -46,12 +45,11 @@ impl Frame {
         }
     }
 
-    pub fn push_control(&mut self, signature: Type, scope_type: ScopeType, label: LabelId) {
+    pub fn push_control(&mut self, signature: Type, scope_type: ScopeType) {
         self.control_stack.push(Control {
             signature,
             scope_type,
             stack_width: self.stack.width(),
-            label,
         });
     }
 
@@ -60,37 +58,30 @@ impl Frame {
             .control_stack
             .pop()
             .ok_or(Fault::ControlStackUnderflow)?;
-        self.stack.shrink_to(c.stack_width);
-        match &c.signature {
+
+        // Pop the result values BEFORE shrinking the stack
+        let results = match &c.signature {
             Type::ValueType(vt) => {
                 if *vt != ValueType::Unit {
-                    let value = Value::pop_from(*vt, &mut self.stack)?;
-                    Ok((c, vec![value]))
+                    vec![Value::pop_from(*vt, &mut self.stack)?]
                 } else {
-                    Ok((c, vec![]))
+                    vec![]
                 }
             }
             Type::FunctionType(ft) => {
-                // pop the return values from the stack
-                let mut results = vec![];
-                for vt in &ft.results {
-                    results.push(Value::pop_from(*vt, &mut self.stack)?);
+                // Pre-allocate and assign by index to avoid double-reverse
+                let mut results = vec![Value::Unit; ft.results.len()];
+                for (i, vt) in ft.results.iter().enumerate().rev() {
+                    results[i] = Value::pop_from(*vt, &mut self.stack)?;
                 }
-                Ok((c, results))
+                results
             }
-        }
-    }
+        };
 
-    pub fn jump_label(&mut self, label_id: LabelId) -> bool {
-        // Find the label in the program's label map
-        let label = self.program.labels.find_label(label_id);
-        match label {
-            Some(position) => {
-                self.pc = position;
-                true
-            }
-            None => false,
-        }
+        // Note: We don't shrink the stack here - that's the caller's responsibility
+        // The caller can decide whether to shrink the stack and push results back
+
+        Ok((c, results))
     }
 
     pub fn push_local_to_stack(&mut self, local_index: u32) -> Result<(), Fault> {
@@ -112,6 +103,7 @@ impl Frame {
         } else {
             Value::top_of(type_of_local, &mut self.stack)?
         };
+        
         self.locals[local_index as usize] = value;
         Ok(())
     }

@@ -12,7 +12,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-use crate::decode::{LabelId, ScopeType};
+use crate::decode::ScopeType;
 use crate::TypeSignature;
 
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -30,16 +30,15 @@ pub enum Op {
 
     // Control flow.
     /// Block->End
-    StartScope(TypeSignature, ScopeType, LabelId),
+    StartScope(TypeSignature, ScopeType),
     EndScope(ScopeType),
-    /// Label is the "else" which could be either right after en Else block, or right before End.
-    If(LabelId),
-    // We hit this opcode in flow-through from an If, and it has the end label to jump to the
-    // end of the if block.
-    Else(LabelId),
-    Br(LabelId),
-    BrIf(LabelId),
-    BrTable(Vec<LabelId>, LabelId),
+    /// If with condition check - no labels needed
+    If,
+    /// Else marker - no labels needed  
+    Else,
+    Br(u32),
+    BrIf(u32),
+    BrTable(Vec<u32>, u32),
     Return,
 
     // Calls
@@ -54,6 +53,11 @@ pub enum Op {
     SetLocal(u32),
     TeeLocal(u32),
     GetGlobal(u32),
+    SetGlobal(u32),
+
+    // Table operations
+    TableGet(u32),
+    TableSet(u32),
 
     // Loads.
     LoadI32(MemArg),
