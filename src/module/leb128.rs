@@ -102,12 +102,88 @@ impl LEB128Reader<'_> {
 
     pub fn load_imm_varint32(&mut self) -> Result<i32, DecodeError> {
         let value = self.load_imm_varuint32()?;
-        Ok(unsafe { std::mem::transmute::<u32, i32>(value) })
+        Ok(value as i32)
     }
 
-    pub fn load_imm_varint64(&mut self) -> Result<i64, DecodeError> {
-        let value = self.load_imm_varuint64()?;
-        Ok(unsafe { std::mem::transmute::<u64, i64>(value) })
+
+    /// Read a signed LEB128 integer (for constants)
+    pub fn load_imm_signed_varint32(&mut self) -> Result<i32, DecodeError> {
+        let mut result = 0i32;
+        let mut shift = 0;
+
+        loop {
+            let byte: u8 = VarintReader::read(&mut self.cursor).map_err(|_| {
+                DecodeError::MalformedMemory(format!(
+                    "Failed to read byte for signed varint32 at offset {}",
+                    self.cursor.position()
+                ))
+            })?;
+
+            // Extract the 7 data bits
+            let value = (byte & 0x7F) as i32;
+            result |= value << shift;
+
+            // Check if this is the last byte (MSB is 0)
+            if byte & 0x80 == 0 {
+                // Sign extend if necessary
+                if shift < 32 && (byte & 0x40) != 0 {
+                    let sign_extend_shift = shift + 7;
+                    if sign_extend_shift < 32 {
+                        result |= !0 << sign_extend_shift;
+                    }
+                }
+                break;
+            }
+
+            shift += 7;
+            if shift >= 32 {
+                return Err(DecodeError::MalformedMemory(
+                    "Signed varint32 too long".to_string(),
+                ));
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Read a signed LEB128 long integer (for constants)
+    pub fn load_imm_signed_varint64(&mut self) -> Result<i64, DecodeError> {
+        let mut result = 0i64;
+        let mut shift = 0;
+
+        loop {
+            let byte: u8 = VarintReader::read(&mut self.cursor).map_err(|_| {
+                DecodeError::MalformedMemory(format!(
+                    "Failed to read byte for signed varint64 at offset {}",
+                    self.cursor.position()
+                ))
+            })?;
+
+            // Extract the 7 data bits
+            let value = (byte & 0x7F) as i64;
+            result |= value << shift;
+
+            // Check if this is the last byte (MSB is 0)
+            if byte & 0x80 == 0 {
+                // Sign extend if necessary
+                if shift < 64 && (byte & 0x40) != 0 {
+                    let sign_extend_shift = shift + 7;
+                    if sign_extend_shift < 64 {
+                        result |= !0 << sign_extend_shift;
+                    }
+                }
+                break;
+            }
+
+            shift += 7;
+            if shift >= 64 {
+                return Err(DecodeError::MalformedMemory(
+                    "Signed varint64 too long".to_string(),
+                ));
+            }
+        }
+
+        Ok(result)
     }
 
     pub fn load_imm_varuint64(&mut self) -> Result<u64, DecodeError> {
