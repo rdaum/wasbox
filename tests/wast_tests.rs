@@ -16,7 +16,7 @@ mod tests {
     use std::fmt::{Debug, Formatter};
     use std::path::Path;
     use wasbox::{
-        mk_instance, DecodeError, Execution, LinkError, LoaderError, Module, VectorMemory,
+        mk_instance, DecodeError, ExecutionState, LinkError, LoaderError, Module, VectorMemory,
     };
     use wast::core::{NanPattern, WastArgCore, WastRetCore};
     use wast::lexer::Lexer;
@@ -185,7 +185,7 @@ mod tests {
 
     enum TestModule {
         None,
-        Loaded(Box<Execution<VectorMemory>>),
+        Loaded(Box<ExecutionState<VectorMemory>>),
         LoadFailed(LoaderError),
         LinkFailed(LinkError),
     }
@@ -213,7 +213,9 @@ mod tests {
                         } else {
                             VectorMemory::new(0, None)
                         };
-                        TestModule::Loaded(Box::new(Execution::new(i, memory)))
+                        let mut exec_state = ExecutionState::new(memory);
+                        exec_state.add_module(0, i);
+                        TestModule::Loaded(Box::new(exec_state))
                     }
                     Err(e) => TestModule::LinkFailed(e),
                 },
@@ -249,7 +251,9 @@ mod tests {
                                 } else {
                                     VectorMemory::new(0, None)
                                 };
-                                TestModule::Loaded(Box::new(Execution::new(i, memory)))
+                                let mut exec_state = ExecutionState::new(memory);
+                        exec_state.add_module(0, i);
+                        TestModule::Loaded(Box::new(exec_state))
                             }
                             Err(e) => {
                                 eprintln!("Link failed at directive #{directive_num} @ {linecol:?}: {e:?}");
@@ -276,12 +280,12 @@ mod tests {
                             panic!("Expected a loaded module for invocation @ {linecol:?}");
                         };
                         let funcidx = execution
-                            .instance()
+                            .instance().unwrap()
                             .find_funcidx(name)
                             .unwrap_or_else(|| panic!("Function not found: {name:?}"));
 
                         let arg_set: Vec<_> = args.iter().map(convert_value).collect();
-                        execution.prepare(funcidx, &arg_set).unwrap();
+                        execution.prepare(0, funcidx, &arg_set).unwrap();
                         execution.run().unwrap();
                         let result = execution.result().unwrap();
 
@@ -332,12 +336,12 @@ mod tests {
                         panic!("Expected a loaded module for invocation @ {linecol:?}");
                     };
                     let funcidx = execution
-                        .instance()
+                        .instance().unwrap()
                         .find_funcidx(name)
                         .unwrap_or_else(|| panic!("Function not found: {name:?}"));
 
                     let arg_set: Vec<_> = args.iter().map(convert_value).collect();
-                    execution.prepare(funcidx, &arg_set).unwrap();
+                    execution.prepare(0, funcidx, &arg_set).unwrap();
                     execution.run().unwrap();
                     // For bare invoke, we don't check the result
                 }
@@ -352,12 +356,12 @@ mod tests {
                             panic!("Expected a loaded module for invocation @ {linecol:?}");
                         };
                         let funcidx = execution
-                            .instance()
+                            .instance().unwrap()
                             .find_funcidx(name)
                             .unwrap_or_else(|| panic!("Function not found: {name:?}"));
 
                         let arg_set: Vec<_> = args.iter().map(convert_value).collect();
-                        execution.prepare(funcidx, &arg_set).unwrap();
+                        execution.prepare(0, funcidx, &arg_set).unwrap();
                         let result = execution.run();
 
                         // We expect this to fail with a trap
@@ -494,11 +498,12 @@ mod tests {
 
         // Create execution context and call the get function
         let memory = instance.memories[0].clone();
-        let mut execution = wasbox::Execution::new(instance, memory);
+        let get_func_idx = instance.find_funcidx("get").unwrap();
+        let mut execution = wasbox::ExecutionState::new(memory);
+        execution.add_module(0, instance);
 
         // Find the "get" function and call it
-        let get_func_idx = execution.instance().find_funcidx("get").unwrap();
-        execution.prepare(get_func_idx, &[]).unwrap();
+        execution.prepare(0, get_func_idx, &[]).unwrap();
         execution.run().unwrap();
 
         // Check that the result is 68 (65 + 3 increments)

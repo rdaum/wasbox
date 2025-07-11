@@ -20,6 +20,7 @@ use crate::module::Global;
 use crate::op::{MemArg, Op};
 use crate::stack::Stack;
 use crate::{FuncType, Instance, Type, TypeSignature, ValueType};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 
@@ -30,6 +31,8 @@ const EXPR_TICK_LIMIT: usize = 1 << 10;
 #[derive(Debug)]
 pub enum Continuation {
     Call(u32),
+    /// Call to function in another module
+    CallExternal { module_id: u32, func_id: u32 },
     /// Program ran out of instructions
     ProgramEnd,
     /// An explicit return instruction was encountered.
@@ -1744,139 +1747,202 @@ impl Display for ExecError {
 
 impl Error for ExecError {}
 
-/// A context for executing functions in an Instance derived from a module.
-pub struct Execution<M>
+
+/// Multi-module execution state that manages multiple instances and their execution
+pub struct ExecutionState<M>
 where
     M: Memory,
 {
-    /// The linked module.
-    // TODO: in the future this could be multiple instances?, one per module.
-    instance: Instance,
-    /// The stack of frames for the current execution.
-    frame_stack: Vec<Frame>,
-    /// The memory for the current execution.
+    /// Collection of all modules/instances participating in execution
+    modules: HashMap<u32, Instance>,
+    /// Global frame stack across all modules
+    frame_stack: Vec<(u32, Frame)>, // (module_id, frame)
+    /// Shared memory across execution
     memory: M,
-    /// Final result of execution when all frames have executed.
+    /// Final result when all execution completes
     result: Option<Vec<Value>>,
 }
 
-impl<M> Execution<M>
+impl<M> ExecutionState<M>
 where
     M: Memory,
 {
-    pub fn new(linkage: Instance, memory: M) -> Self {
-        Execution {
-            instance: linkage,
+    pub fn new(memory: M) -> Self {
+        ExecutionState {
+            modules: HashMap::new(),
             frame_stack: vec![],
             memory,
             result: None,
         }
     }
 
-    pub fn instance(&self) -> &Instance {
-        &self.instance
+    pub fn add_module(&mut self, module_id: u32, instance: Instance) {
+        self.modules.insert(module_id, instance);
     }
 
-    pub fn into_instance(self) -> Instance {
-        self.instance
+    pub fn get_module(&self, module_id: u32) -> Option<&Instance> {
+        self.modules.get(&module_id)
     }
 
-    pub fn into_instance_with_memory(self) -> Instance
-    where
-        M: Into<crate::VectorMemory>,
-    {
-        let mut instance = self.instance;
-        // Update the instance's memory with the execution's memory
-        if !instance.memories.is_empty() {
-            instance.memories[0] = self.memory.into();
-        }
-        instance
+    pub fn get_module_mut(&mut self, module_id: u32) -> Option<&mut Instance> {
+        self.modules.get_mut(&module_id)
     }
 
-    pub fn result(&self) -> Option<&[Value]> {
-        self.result.as_deref()
+    pub fn instance(&self) -> Option<&Instance> {
+        self.modules.get(&0)
     }
 
     pub fn frame_stack_len(&self) -> usize {
         self.frame_stack.len()
     }
 
-    pub fn prepare(&mut self, funcidx: u32, args: &[Value]) -> Result<(), ExecError> {
-        let frame = self
-            .instance
+    pub fn result(&self) -> Option<&[Value]> {
+        self.result.as_deref()
+    }
+
+    pub fn take_module(&mut self, module_id: u32) -> Option<Instance> 
+    where
+        M: Clone + Into<crate::VectorMemory>,
+    {
+        if let Some(mut instance) = self.modules.remove(&module_id) {
+            // Sync memory changes back to the instance before returning it
+            if !instance.memories.is_empty() {
+                instance.memories[0] = self.memory.clone().into();
+            }
+            Some(instance)
+        } else {
+            None
+        }
+    }
+
+    pub fn into_single_module(self) -> Option<Instance> {
+        if self.modules.len() == 1 {
+            self.modules.into_iter().next().map(|(_, instance)| instance)
+        } else {
+            None
+        }
+    }
+
+    pub fn prepare(&mut self, module_id: u32, funcidx: u32, args: &[Value]) -> Result<(), ExecError> {
+        let instance = self.modules.get(&module_id)
+            .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
+        
+        let frame = instance
             .frame_for_funcidx(funcidx, args)
             .map_err(ExecError::LinkageError)?;
 
-        // TODO: Need to fix the label mismatch properly
-
-        self.frame_stack.push(frame);
+        self.frame_stack.push((module_id, frame));
         Ok(())
     }
 
+    /// Main execution loop that handles cross-module calls
     pub fn run(&mut self) -> Result<(), ExecError> {
         loop {
-            let top_frame = self.frame_stack.last_mut().unwrap();
-            let result = execute(
-                top_frame,
-                &mut self.memory,
-                &mut self.instance.globals,
-                &mut self.instance.tables,
-                1000000, // Increased for memory checking loops
-                &self.instance.module.types,
-                &self.instance.module.functions,
-            );
+            if self.frame_stack.is_empty() {
+                return Ok(());
+            }
+
+            let (current_module_id, _) = self.frame_stack.last().unwrap();
+            let current_module_id = *current_module_id;
+            
+            // Execute current frame
+            let result = {
+                let (_, frame) = self.frame_stack.last_mut().unwrap();
+                let module = self.modules.get_mut(&current_module_id).unwrap();
+                
+                execute(
+                    frame,
+                    &mut self.memory,
+                    &mut module.globals,
+                    &mut module.tables,
+                    1000000,
+                    &module.module.types,
+                    &module.module.functions,
+                )
+            };
+
             match result {
                 Ok(Continuation::ProgramEnd) | Ok(Continuation::DoneReturn) => {
-                    // Stack is LIFO - pop values and assign to correct indices
-                    let mut return_values =
-                        vec![(ValueType::Unit, Value::Unit); top_frame.return_types.len()];
-                    for (i, rt) in top_frame.return_types.iter().enumerate().rev() {
-                        let value = Value::pop_from(*rt, &mut top_frame.stack)
+                    // Handle function return
+                    let (_, completed_frame) = self.frame_stack.pop().unwrap();
+                    
+                    // Collect return values
+                    let mut return_values = vec![(ValueType::Unit, Value::Unit); completed_frame.return_types.len()];
+                    let mut temp_stack = completed_frame.stack;
+                    for (i, rt) in completed_frame.return_types.iter().enumerate().rev() {
+                        let value = Value::pop_from(*rt, &mut temp_stack)
                             .map_err(ExecError::ExecutionFault)?;
                         return_values[i] = (*rt, value);
                     }
-                    let _popped_frame = self.frame_stack.pop();
-                    if let Some(frame) = self.frame_stack.last_mut() {
+                    
+                    if let Some((_, caller_frame)) = self.frame_stack.last_mut() {
+                        // Push return values to caller's stack
                         for (_, v) in return_values {
-                            v.push_to(&mut frame.stack);
+                            v.push_to(&mut caller_frame.stack);
                         }
-                        continue;
                     } else {
+                        // No caller, this is the final result
                         self.result = Some(return_values.into_iter().map(|(_, v)| v).collect());
                         return Ok(());
                     }
                 }
                 Ok(Continuation::Call(funcidx)) => {
-                    // Get the function signature to know what arguments to pop from the stack
-                    let current_frame = self.frame_stack.last_mut().unwrap();
-
-                    // Look up the function signature
-                    let func_index = if funcidx < self.instance.module.functions.len() as u32 {
-                        funcidx
-                    } else {
+                    // Intra-module call
+                    let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                    let module = self.modules.get(&current_module_id).unwrap();
+                    
+                    // Get function signature and pop arguments
+                    let func_index = funcidx as usize;
+                    if func_index >= module.module.functions.len() {
                         return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
-                    };
-
-                    let type_idx = self.instance.module.functions[func_index as usize];
-                    let func_type = &self.instance.module.types[type_idx];
-
-                    // Pop arguments from the current frame's stack
+                    }
+                    
+                    let type_idx = module.module.functions[func_index];
+                    let func_type = &module.module.types[type_idx];
+                    
                     let mut args = vec![Value::Unit; func_type.params.len()];
                     for (i, param_type) in func_type.params.iter().enumerate().rev() {
                         let value = Value::pop_from(*param_type, &mut current_frame.stack)
                             .map_err(ExecError::ExecutionFault)?;
                         args[i] = value;
                     }
-
-                    let frame = self
-                        .instance
+                    
+                    // Create new frame for the called function
+                    let frame = module
                         .frame_for_funcidx(funcidx, &args)
                         .map_err(ExecError::LinkageError)?;
-                    self.frame_stack.push(frame);
+                    self.frame_stack.push((current_module_id, frame));
                 }
-
+                Ok(Continuation::CallExternal { module_id, func_id }) => {
+                    // Inter-module call
+                    let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                    let target_module = self.modules.get(&module_id)
+                        .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
+                    
+                    // Get function signature and pop arguments
+                    let func_index = func_id as usize;
+                    if func_index >= target_module.module.functions.len() {
+                        return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
+                    }
+                    
+                    let type_idx = target_module.module.functions[func_index];
+                    let func_type = &target_module.module.types[type_idx];
+                    
+                    let mut args = vec![Value::Unit; func_type.params.len()];
+                    for (i, param_type) in func_type.params.iter().enumerate().rev() {
+                        let value = Value::pop_from(*param_type, &mut current_frame.stack)
+                            .map_err(ExecError::ExecutionFault)?;
+                        args[i] = value;
+                    }
+                    
+                    // Create new frame in target module
+                    let frame = target_module
+                        .frame_for_funcidx(func_id, &args)
+                        .map_err(ExecError::LinkageError)?;
+                    self.frame_stack.push((module_id, frame));
+                }
                 Err(fault) => {
-                    // Clean up the current frame when a fault occurs
+                    // Clean up current frame on fault
                     self.frame_stack.pop();
                     return Err(ExecError::ExecutionFault(fault));
                 }
@@ -1885,21 +1951,92 @@ where
     }
 }
 
+
 #[cfg(test)]
 mod tests {
-    use crate::exec::{Execution, Value};
+    use crate::exec::{ExecutionState, Value};
     use crate::instance::mk_instance;
     use crate::module::Module;
+    use crate::memory::VectorMemory;
 
     #[test]
-    fn load_run_itoa() {
+    fn load_run_itoa_with_execution_state() {
         let module_data: Vec<u8> = include_bytes!("../tests/itoa.wasm").to_vec();
         let module = Module::load(&module_data).unwrap();
-
         let linked = mk_instance(module).unwrap();
+        
+        // Use the linked module's memory instead of creating a new one
         let memory = linked.memories[0].clone();
-        let mut execution = Execution::new(linked, memory);
-        execution.prepare(1, &[Value::I32(123)]).unwrap();
-        execution.run().unwrap();
+        let mut exec_state = ExecutionState::new(memory);
+        
+        // Add the module and run the itoa function
+        exec_state.add_module(0, linked);
+        exec_state.prepare(0, 1, &[Value::I32(123)]).unwrap();
+        exec_state.run().unwrap();
     }
+
+    #[test]
+    fn test_execution_state_single_module() {
+        let module_data: Vec<u8> = include_bytes!("../tests/itoa.wasm").to_vec();
+        let module = Module::load(&module_data).unwrap();
+        let linked = mk_instance(module).unwrap();
+        
+        // Use the linked module's memory instead of creating a new one
+        let memory = linked.memories[0].clone();
+        let mut exec_state = ExecutionState::new(memory);
+        
+        // Add the module to the execution state
+        exec_state.add_module(0, linked);
+        
+        // Prepare and run a function
+        exec_state.prepare(0, 1, &[Value::I32(123)]).unwrap();
+        exec_state.run().unwrap();
+        
+        // Should have executed successfully
+        assert_eq!(exec_state.frame_stack_len(), 0);
+    }
+
+    #[test]
+    fn test_execution_state_module_management() {
+        let module_data: Vec<u8> = include_bytes!("../tests/itoa.wasm").to_vec();
+        let module = Module::load(&module_data).unwrap();
+        let linked = mk_instance(module).unwrap();
+        
+        let memory = VectorMemory::new(1, None);
+        let mut exec_state = ExecutionState::new(memory);
+        
+        // Test adding and retrieving modules
+        exec_state.add_module(42, linked);
+        assert!(exec_state.get_module(42).is_some());
+        assert!(exec_state.get_module(99).is_none());
+        
+        // Test mutable access
+        assert!(exec_state.get_module_mut(42).is_some());
+        assert!(exec_state.get_module_mut(99).is_none());
+    }
+
+    #[test]
+    fn test_execution_state_empty_run() {
+        let memory = VectorMemory::new(1, None);
+        let mut exec_state = ExecutionState::<VectorMemory>::new(memory);
+        
+        // Running with no frames should return immediately
+        let result = exec_state.run();
+        assert!(result.is_ok());
+        assert_eq!(exec_state.frame_stack_len(), 0);
+    }
+
+    #[test]
+    fn test_execution_state_nonexistent_module() {
+        let memory = VectorMemory::new(1, None);
+        let mut exec_state = ExecutionState::<VectorMemory>::new(memory);
+        
+        // Try to prepare a function in a non-existent module
+        let result = exec_state.prepare(999, 0, &[]);
+        assert!(result.is_err());
+    }
+
+    // Note: Multi-module tests would require creating multiple WASM modules
+    // with imports/exports which is more complex. For now, we test the
+    // infrastructure with single modules.
 }

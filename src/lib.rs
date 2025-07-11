@@ -36,7 +36,7 @@ mod stack;
 
 pub use crate::decode::DecodeError;
 use crate::module::LEB128Reader;
-pub use exec::{ExecError, Execution, Value};
+pub use exec::{ExecError, ExecutionState, Value};
 pub use frame::Frame;
 pub use instance::LinkError;
 pub use instance::{mk_instance, Instance, TableInstance};

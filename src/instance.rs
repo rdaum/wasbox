@@ -215,7 +215,7 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
     // Execute start function if present
     if let Some(start_func_idx) = instance.module.start_function {
         // Create execution context and run the start function
-        use crate::{Execution, VectorMemory};
+        use crate::{ExecutionState, VectorMemory};
 
         let memory = if !instance.memories.is_empty() {
             instance.memories[0].clone()
@@ -223,9 +223,10 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
             VectorMemory::new(0, None)
         };
 
-        let mut execution = Execution::new(instance, memory);
+        let mut execution = ExecutionState::new(memory);
+        execution.add_module(0, instance);
         execution
-            .prepare(start_func_idx as u32, &[])
+            .prepare(0, start_func_idx as u32, &[])
             .map_err(|e| match e {
                 crate::exec::ExecError::ExecutionFault(f) => LinkError::ActiveExpressionError(f),
                 crate::exec::ExecError::LinkageError(l) => l,
@@ -235,8 +236,8 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
             crate::exec::ExecError::LinkageError(l) => l,
         })?;
 
-        // Extract the instance back from execution and return it
-        let updated_instance = execution.into_instance_with_memory();
+        // Extract the instance back from execution (automatically syncs memory)
+        let updated_instance = execution.take_module(0).unwrap();
         Ok(updated_instance)
     } else {
         Ok(instance)
