@@ -233,7 +233,12 @@ impl Module {
                             }
                             ImportExportKind::Global => {
                                 let valtype = ValueType::read(&mut reader).map_err(DecoderError)?;
-                                let is_mut = reader.load_imm_u8().map_err(DecoderError)? == 1;
+                                let mut_byte = reader.load_imm_u8().map_err(DecoderError)?;
+                                let is_mut = match mut_byte {
+                                    0 => false,
+                                    1 => true,
+                                    _ => return Err(LoaderError::DecoderError(DecodeError::MalformedMutability(mut_byte))),
+                                };
                                 Import::Global(valtype, is_mut)
                             }
                         };
@@ -432,7 +437,11 @@ impl Module {
                     for _ in 0..num_globals {
                         let ty = ValueType::read(&mut reader).map_err(DecoderError)?;
                         let mut_flag = reader.load_imm_u8().map_err(DecoderError)?;
-                        let mutable = mut_flag == 1;
+                        let mutable = match mut_flag {
+                            0 => false,
+                            1 => true,
+                            _ => return Err(LoaderError::DecoderError(DecodeError::MalformedMutability(mut_flag))),
+                        };
                         let expr = reader.load_expr().map_err(DecoderError)?;
                         globals.push(Global { ty, mutable, expr });
                     }

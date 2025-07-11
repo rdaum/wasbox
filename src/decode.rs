@@ -34,6 +34,7 @@ pub enum DecodeError {
     InvalidDataSegmentType(u32),
     UnsupportedType(u32, String),
     MalformedMemory(String),
+    MalformedMutability(u8),
 }
 
 impl Display for DecodeError {
@@ -59,6 +60,9 @@ impl Display for DecodeError {
             }
             DecodeError::MalformedMemory(reason) => {
                 write!(f, "Malformed memory: {reason}")
+            }
+            DecodeError::MalformedMutability(value) => {
+                write!(f, "malformed mutability: {value}")
             }
         }
     }

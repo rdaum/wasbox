@@ -12,8 +12,9 @@
 //
 
 use crate::decode::{decode, Program, ScopeType};
-use crate::exec::{exec_fragment, Fault, GlobalVar, Value};
+use crate::exec::{eval_init_expr, Fault, GlobalVar, Value};
 use crate::frame::Frame;
+use crate::import::{ImportedFunction, ImportResolver};
 use crate::module::{Data, ReferenceType};
 use crate::stack::Stack;
 use crate::{DecodeError, Module, Type, ValueType, VectorMemory};
@@ -64,10 +65,94 @@ pub struct Instance {
     pub globals: Vec<GlobalVar>,
     pub programs: Vec<Program>,
     pub tables: Vec<TableInstance>,
+    pub imported_functions: Vec<ImportedFunction>,
+}
+
+/// Produce an instance from a module with import resolution.
+pub fn mk_instance_with_imports(
+    module: Module,
+    resolver: &dyn ImportResolver,
+) -> Result<Instance, LinkError> {
+    // Resolve imports first
+    let mut imported_functions = Vec::new();
+    let mut imported_globals = Vec::new();
+    let mut imported_tables = Vec::new();
+    let mut imported_memories = Vec::new();
+    
+    for (module_name, field_name, import) in &module.imports {
+        match import {
+            crate::module::Import::Func(_type_idx) => {
+                if let Some(imported_func) = resolver.resolve_function(module_name, field_name) {
+                    imported_functions.push(imported_func);
+                } else {
+                    return Err(LinkError::UnsupportedFeature(format!(
+                        "Cannot resolve import: {module_name}::{field_name}"
+                    )));
+                }
+            }
+            crate::module::Import::Global(_value_type, _mutable) => {
+                if let Some(imported_global) = resolver.resolve_global(module_name, field_name) {
+                    imported_globals.push(imported_global);
+                } else {
+                    return Err(LinkError::UnsupportedFeature(format!(
+                        "Cannot resolve import: {module_name}::{field_name}"
+                    )));
+                }
+            }
+            crate::module::Import::Table(_ref_type, _limits) => {
+                if let Some(imported_table) = resolver.resolve_table(module_name, field_name) {
+                    imported_tables.push(imported_table);
+                } else {
+                    return Err(LinkError::UnsupportedFeature(format!(
+                        "Cannot resolve import: {module_name}::{field_name}"
+                    )));
+                }
+            }
+            crate::module::Import::Memory(_limits) => {
+                if let Some(imported_memory) = resolver.resolve_memory(module_name, field_name) {
+                    imported_memories.push(imported_memory);
+                } else {
+                    return Err(LinkError::UnsupportedFeature(format!(
+                        "Cannot resolve import: {module_name}::{field_name}"
+                    )));
+                }
+            }
+        }
+    }
+
+    // Create instance with the resolved imports
+    mk_instance_internal(module, imported_functions, imported_globals, imported_tables, imported_memories)
 }
 
 /// Produce an instance from a module.
 pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
+    // For modules without imports, use the original logic to avoid any regressions
+    mk_instance_internal(module, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+}
+
+fn mk_instance_internal(
+    module: Module,
+    imported_functions: Vec<ImportedFunction>,
+    imported_globals: Vec<Value>,
+    imported_tables: Vec<TableInstance>,
+    imported_memories: Vec<VectorMemory>,
+) -> Result<Instance, LinkError> {
+    // Check if this module has any imports
+    let has_imports = !imported_functions.is_empty() || !imported_globals.is_empty() || !imported_tables.is_empty() || !imported_memories.is_empty();
+    
+    // Create imported globals context first for initialization expressions
+    let mut imported_global_vars = Vec::new();
+    for imported_global in &imported_globals {
+        let dummy_decl = crate::module::Global {
+            ty: imported_global.type_of(),
+            mutable: false, // TODO: Get actual mutability from import declaration
+            expr: (0, 0), // Empty expression range
+        };
+        imported_global_vars.push(GlobalVar {
+            decl: dummy_decl,
+            value: *imported_global,
+        });
+    }
     let mut programs = Vec::with_capacity(module.code.len());
 
     for (i, code) in module.code.iter().enumerate() {
@@ -91,7 +176,9 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
         programs.push(program);
     }
 
-    let mut memories: Vec<_> = module
+    // Initialize memories: imported memories first, then local memories
+    let mut memories: Vec<_> = imported_memories.into_iter().collect();
+    memories.extend(module
         .memories
         .iter()
         .map(|m_decl| {
@@ -101,11 +188,11 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
                 min_pages as usize * WASM_PAGE_SIZE,
                 max_pages.map(|x| x as usize * WASM_PAGE_SIZE),
             )
-        })
-        .collect();
+        }));
 
-    // Initialize tables
-    let mut tables: Vec<_> = module
+    // Initialize tables: imported tables first, then local tables
+    let mut tables: Vec<_> = imported_tables.into_iter().collect();
+    tables.extend(module
         .tables
         .iter()
         .map(|t_decl| {
@@ -116,8 +203,7 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
                 ref_type: t_decl.ty,
                 limits: (min_size, max_size),
             }
-        })
-        .collect();
+        }));
 
     // Apply active element segments to initialize tables
     for element_segment in &module.element_segments {
@@ -126,8 +212,20 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
             if table_idx < tables.len() {
                 if let crate::module::Elements::Function(func_indices) = &element_segment.elements {
                     // Evaluate the init expression to get the offset
-                    let offset_value = exec_fragment(module.get_expr(expr), ValueType::I32)
-                        .map_err(LinkError::ActiveExpressionError)?;
+                    let offset_value = if has_imports {
+                        // Build complete function index space: [imported_functions] + [local_functions]
+                        let mut function_types = Vec::new();
+                        for (_, _, import) in &module.imports {
+                            if let crate::module::Import::Func(type_idx) = import {
+                                function_types.push(*type_idx as usize);
+                            }
+                        }
+                        function_types.extend_from_slice(&module.functions);
+                        eval_init_expr(module.get_expr(expr), ValueType::I32, &imported_global_vars, &module.types, &function_types)
+                    } else {
+                        // Even without imports, we need to pass function information for ref.func to work
+                        eval_init_expr(module.get_expr(expr), ValueType::I32, &[], &module.types, &module.functions)
+                    }.map_err(LinkError::ActiveExpressionError)?;
                     let Value::I32(offset) = offset_value else {
                         panic!("Element segment offset must be i32");
                     };
@@ -157,8 +255,20 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
                 Data::Active { expr, data } => {
                     // We have to execute the program located at expr in order to get the address
                     // of the data segment.
-                    let data_offset = exec_fragment(module.get_expr(expr), ValueType::I32)
-                        .map_err(LinkError::ActiveExpressionError)?;
+                    let data_offset = if has_imports {
+                        // Build complete function index space: [imported_functions] + [local_functions]
+                        let mut function_types = Vec::new();
+                        for (_, _, import) in &module.imports {
+                            if let crate::module::Import::Func(type_idx) = import {
+                                function_types.push(*type_idx as usize);
+                            }
+                        }
+                        function_types.extend_from_slice(&module.functions);
+                        eval_init_expr(module.get_expr(expr), ValueType::I32, &imported_global_vars, &module.types, &function_types)
+                    } else {
+                        // Even without imports, we need to pass function information for ref.func to work
+                        eval_init_expr(module.get_expr(expr), ValueType::I32, &[], &module.types, &module.functions)
+                    }.map_err(LinkError::ActiveExpressionError)?;
                     let Value::I32(data_offset) = data_offset else {
                         panic!("Data segment offset must be i32");
                     };
@@ -171,8 +281,20 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
                 Data::ActiveMemIdx { memidx, expr, data } => {
                     // This is identical to above but with a memory index set. But standard doesn't
                     // support multiple memories yet. But we'll just go ahead and implement it.
-                    let data_offset = exec_fragment(module.get_expr(expr), ValueType::I32)
-                        .map_err(LinkError::ActiveExpressionError)?;
+                    let data_offset = if has_imports {
+                        // Build complete function index space: [imported_functions] + [local_functions]
+                        let mut function_types = Vec::new();
+                        for (_, _, import) in &module.imports {
+                            if let crate::module::Import::Func(type_idx) = import {
+                                function_types.push(*type_idx as usize);
+                            }
+                        }
+                        function_types.extend_from_slice(&module.functions);
+                        eval_init_expr(module.get_expr(expr), ValueType::I32, &imported_global_vars, &module.types, &function_types)
+                    } else {
+                        // Even without imports, we need to pass function information for ref.func to work
+                        eval_init_expr(module.get_expr(expr), ValueType::I32, &[], &module.types, &module.functions)
+                    }.map_err(LinkError::ActiveExpressionError)?;
                     let Value::I32(data_offset) = data_offset else {
                         panic!("Data segment offset must be i32");
                     };
@@ -191,13 +313,30 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
         }
     }
 
-    // Populate globals.
-    let mut globals = Vec::with_capacity(module.globals.len());
+    // Populate globals: imported globals first, then local globals
+    let mut globals = Vec::with_capacity(imported_globals.len() + module.globals.len());
+    
+    // Add imported globals first (reuse the ones we created for initialization context)
+    globals.extend(imported_global_vars.iter().cloned());
+    
+    // Then add local globals
     for global_segment in &module.globals {
         // Execute the expression in the global
         let program = module.get_expr(&global_segment.expr);
-        let result =
-            exec_fragment(program, global_segment.ty).map_err(LinkError::ActiveExpressionError)?;
+        let result = if has_imports {
+            // Build complete function index space: [imported_functions] + [local_functions]
+            let mut function_types = Vec::new();
+            for (_, _, import) in &module.imports {
+                if let crate::module::Import::Func(type_idx) = import {
+                    function_types.push(*type_idx as usize);
+                }
+            }
+            function_types.extend_from_slice(&module.functions);
+            eval_init_expr(program, global_segment.ty, &imported_global_vars, &module.types, &function_types)
+        } else {
+            // Even without imports, we need to pass function information for ref.func to work
+            eval_init_expr(program, global_segment.ty, &[], &module.types, &module.functions)
+        }.map_err(LinkError::ActiveExpressionError)?;
         globals.push(GlobalVar {
             decl: global_segment.clone(),
             value: result,
@@ -210,6 +349,7 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
         globals,
         programs,
         tables,
+        imported_functions,
     };
 
     // Execute start function if present
@@ -261,24 +401,24 @@ impl Instance {
 
     pub fn frame_for_funcidx(&self, index: u32, args: &[Value]) -> Result<Frame, LinkError> {
         // Funcidx must consider also the imports, it isn't just an offset into `code` section.
-        // So to find the function index, scan imports first
-        // Then scan functions/code.
-        // We don't actually handle imports yet, so that's a panic if it's in that space.
-        // We could make this more efficient by precomputing the number of imported functions, and
-        // stashing that in the linked struct, or even having a map of funcidx to code idx.
+        // Function index space: [imported_functions] + [local_functions]
+        // Count imported functions from the module's import section
         let mut num_imported_funcs = 0;
         for (_, _, import) in self.module.imports.iter() {
             match import {
-                crate::module::Import::Func(idx) => {
+                crate::module::Import::Func(_type_idx) => {
                     num_imported_funcs += 1;
-                    if *idx == index {
-                        return Err(LinkError::UnsupportedFeature(
-                            "Imported functions not supported yet".to_string(),
-                        ));
-                    }
                 }
                 _ => continue,
             }
+        }
+        
+        // If index is within imported functions range, we can't create a frame for it
+        // (imported functions are dispatched via continuation mechanism)
+        if index < num_imported_funcs {
+            return Err(LinkError::UnsupportedFeature(
+                "Cannot create frame for imported function - use continuation dispatch".to_string(),
+            ));
         }
         let funcidx = index - num_imported_funcs;
         let typeindx = self.module.functions[funcidx as usize];
