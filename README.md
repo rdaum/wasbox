@@ -18,7 +18,7 @@ tools and applications.
 
 ### status
 
-Recent work has implemented structured control flow and fixed major execution issues. Several fundamental WASM test
+Recent work has fixed major execution engine issues and expanded test coverage. Several fundamental WASM test
 suites now pass:
 
 - ✅ **i32/i64 operations** - arithmetic, comparison, bitwise ops
@@ -26,9 +26,10 @@ suites now pass:
 - ✅ **local variables** - get/set/tee operations
 - ✅ **constants** - all constant value operations
 - ✅ **control flow** - if/else, block, loop, br/br_if/br_table
-- ✅ **function calls** - direct calls and basic call_indirect
+- ✅ **function calls** - direct calls and call_indirect with type checking
 - ✅ **memory ops** - load/store for modules with memory
-- ✅ **reference types** 
+- ✅ **reference types** - complete implementation
+- ✅ **WAST test support** - comprehensive test runner with trap handling
 
 Still missing (partial list):
 
