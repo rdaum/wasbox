@@ -78,12 +78,12 @@ impl Memory for VectorMemory {
                 return Err(Fault::CannotGrowMemory);
             }
         }
-        
+
         // Prevent excessive memory allocations (1GB limit for safety)
         if new_size > 1024 * 1024 * 1024 {
             return Err(Fault::CannotGrowMemory);
         }
-        
+
         self.data.resize(new_size, 0);
         Ok(self.data.len())
     }

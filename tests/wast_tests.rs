@@ -373,7 +373,7 @@ mod tests {
                         let arg_set: Vec<_> = args.iter().map(convert_value).collect();
                         execution.prepare(funcidx, &arg_set).unwrap();
                         let result = execution.run();
-                        
+
                         // We expect this to fail with a trap
                         match result {
                             Err(wasbox::ExecError::ExecutionFault(fault)) => {
@@ -404,8 +404,10 @@ mod tests {
                             ),
                         }
                     }
-                    _ => panic!("Unsupported exec directive in assert_trap: {exec:?} @ {linecol:?}"),
-                }
+                    _ => {
+                        panic!("Unsupported exec directive in assert_trap: {exec:?} @ {linecol:?}")
+                    }
+                },
                 _ => {}
             }
         }
@@ -468,5 +470,4 @@ mod tests {
     wast_test!(float_exprs_test, "float_exprs.wast");
     wast_test!(labels_test, "labels.wast");
     wast_test!(left_to_right_test, "left-to-right.wast");
-
 }

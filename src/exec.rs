@@ -85,6 +85,8 @@ pub enum Fault {
     UninitializedElement,
     /// Invalid conversion to integer
     InvalidConversion,
+    /// Indirect call type mismatch
+    IndirectCallTypeMismatch,
 }
 
 impl Display for Fault {
@@ -106,6 +108,7 @@ impl Display for Fault {
             Fault::UndefinedElement => write!(f, "undefined element"),
             Fault::UninitializedElement => write!(f, "uninitialized element"),
             Fault::InvalidConversion => write!(f, "invalid conversion to integer"),
+            Fault::IndirectCallTypeMismatch => write!(f, "indirect call type mismatch"),
         }
     }
 }
@@ -372,6 +375,7 @@ fn execute<M>(
     tables: &mut [TableInstance],
     max_ticks: usize,
     types: &[FuncType],
+    functions: &[usize],
 ) -> Result<Continuation, Fault>
 where
     M: Memory,
@@ -498,12 +502,32 @@ where
                 }
 
                 match &table.elements[table_index as usize] {
+                    None => {
+                        return Err(Fault::UninitializedElement); // Uninitialized table element
+                    }
                     Some(Value::FuncRef(Some(func_index))) => {
-                        // TODO: Verify function signature matches type_idx
+                        // Verify function signature matches type_idx
+                        if *func_index as usize >= functions.len() {
+                            return Err(Fault::UndefinedElement);
+                        }
+
+                        let func_type_idx = functions[*func_index as usize];
+                        if func_type_idx >= types.len() || _type_idx as usize >= types.len() {
+                            return Err(Fault::UnresolvableTypeIndex(_type_idx));
+                        }
+
+                        let expected_type = &types[_type_idx as usize];
+                        let actual_type = &types[func_type_idx];
+
+                        // Check if function signatures match (structural typing)
+                        if expected_type != actual_type {
+                            return Err(Fault::IndirectCallTypeMismatch);
+                        }
+
                         return Ok(Continuation::Call(*func_index));
                     }
                     Some(Value::FuncRef(None)) => {
-                        return Err(Fault::UndefinedElement); // Null function reference
+                        return Err(Fault::UninitializedElement); // Null function reference
                     }
                     _ => {
                         return Err(Fault::UndefinedElement); // Invalid table element
@@ -1700,6 +1724,7 @@ pub(crate) fn exec_fragment(program: &[u8], return_type: ValueType) -> Result<Va
         &mut const_prg_tables,
         EXPR_TICK_LIMIT,
         &[],
+        &[],
     )?;
     // Must be `ProgramEnd`, or there's a bug, and that's UnexpectedResult
     match result {
@@ -1790,6 +1815,7 @@ where
                 &mut self.instance.tables,
                 1000000, // Increased for memory checking loops
                 &self.instance.module.types,
+                &self.instance.module.functions,
             );
             match result {
                 Ok(Continuation::ProgramEnd) | Ok(Continuation::DoneReturn) => {
