@@ -452,7 +452,7 @@ mod tests {
     wast_test!(conversions_test, "conversions.wast");
     wast_test!(memory_test, "memory.wast");
     wast_test!(memory_size_test, "memory_size.wast");
-    // wast_test!(memory_grow_test, "memory_grow.wast"); // TODO: Stack underflow issue
+    wast_test!(memory_grow_test, "memory_grow.wast");
     wast_test!(elem_test, "elem.wast");
     wast_test!(table_test, "table.wast");
     wast_test!(exports_test, "exports.wast");
@@ -469,46 +469,4 @@ mod tests {
     wast_test!(labels_test, "labels.wast");
     wast_test!(left_to_right_test, "left-to-right.wast");
 
-    #[test]
-    fn test_basic_conversions() {
-        let wat = std::fs::read_to_string("/Users/ryan/wasbox/test_basic_conversions.wat").unwrap();
-        let binary = wat::parse_str(&wat).expect("Failed to parse WAT");
-        let module = wasbox::Module::load(&binary).expect("Failed to load module");
-        let instance = wasbox::mk_instance(module).expect("Failed to create instance");
-        let memory = wasbox::VectorMemory::new(0, None);
-        let mut execution = wasbox::Execution::new(instance, memory);
-
-        // Test i64.extend_i32_s
-        let func_idx = execution
-            .instance()
-            .find_funcidx("i64.extend_i32_s")
-            .unwrap();
-        execution
-            .prepare(func_idx, &[wasbox::Value::I32(-1)])
-            .unwrap();
-        execution.run().unwrap();
-        let result = execution.result().unwrap();
-        assert_eq!(result, vec![wasbox::Value::I64(-1)]);
-
-        // Test i32.wrap_i64
-        let func_idx = execution.instance().find_funcidx("i32.wrap_i64").unwrap();
-        execution
-            .prepare(func_idx, &[wasbox::Value::I64(0x100000000)])
-            .unwrap();
-        execution.run().unwrap();
-        let result = execution.result().unwrap();
-        assert_eq!(result, vec![wasbox::Value::I32(0)]);
-
-        // Test f32.convert_i32_s
-        let func_idx = execution
-            .instance()
-            .find_funcidx("f32.convert_i32_s")
-            .unwrap();
-        execution
-            .prepare(func_idx, &[wasbox::Value::I32(42)])
-            .unwrap();
-        execution.run().unwrap();
-        let result = execution.result().unwrap();
-        assert_eq!(result, vec![wasbox::Value::F32(42.0)]);
-    }
 }

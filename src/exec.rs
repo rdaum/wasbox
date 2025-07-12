@@ -489,12 +489,12 @@ where
 
                 // Look up the function reference in the specified table
                 if table_idx as usize >= tables.len() {
-                    return Err(Fault::MemoryOutOfBounds); // Table index out of bounds
+                    return Err(Fault::UndefinedElement); // Table index out of bounds
                 }
                 let table = &tables[table_idx as usize];
 
                 if table_index as usize >= table.elements.len() {
-                    return Err(Fault::MemoryOutOfBounds); // Table index out of bounds
+                    return Err(Fault::UndefinedElement); // Table index out of bounds
                 }
 
                 match &table.elements[table_index as usize] {
@@ -503,10 +503,10 @@ where
                         return Ok(Continuation::Call(*func_index));
                     }
                     Some(Value::FuncRef(None)) => {
-                        return Err(Fault::MemoryOutOfBounds); // Null function reference
+                        return Err(Fault::UndefinedElement); // Null function reference
                     }
                     _ => {
-                        return Err(Fault::MemoryOutOfBounds); // Invalid table element
+                        return Err(Fault::UndefinedElement); // Invalid table element
                     }
                 }
             }
@@ -1764,6 +1764,10 @@ where
         self.result.as_deref()
     }
 
+    pub fn frame_stack_len(&self) -> usize {
+        self.frame_stack.len()
+    }
+
     pub fn prepare(&mut self, funcidx: u32, args: &[Value]) -> Result<(), ExecError> {
         let frame = self
             .instance
@@ -1784,7 +1788,7 @@ where
                 &mut self.memory,
                 &mut self.instance.globals,
                 &mut self.instance.tables,
-                10000,
+                1000000, // Increased for memory checking loops
                 &self.instance.module.types,
             );
             match result {
@@ -1797,7 +1801,7 @@ where
                             .map_err(ExecError::ExecutionFault)?;
                         return_values[i] = (*rt, value);
                     }
-                    self.frame_stack.pop();
+                    let _popped_frame = self.frame_stack.pop();
                     if let Some(frame) = self.frame_stack.last_mut() {
                         for (_, v) in return_values {
                             v.push_to(&mut frame.stack);
@@ -1837,7 +1841,11 @@ where
                     self.frame_stack.push(frame);
                 }
 
-                Err(fault) => return Err(ExecError::ExecutionFault(fault)),
+                Err(fault) => {
+                    // Clean up the current frame when a fault occurs
+                    self.frame_stack.pop();
+                    return Err(ExecError::ExecutionFault(fault));
+                }
             }
         }
     }
