@@ -387,12 +387,6 @@ mod tests {
     }
 
     #[test]
-    fn minimal_br_test() {
-        let path = Path::new("test_minimal.wast");
-        perform_wast(path);
-    }
-
-    #[test]
     fn i32_test() {
         let path = Path::new("tests/testsuite/i32.wast");
         perform_wast(path);
@@ -425,6 +419,24 @@ mod tests {
     #[test]
     fn f32_test() {
         let path = Path::new("tests/testsuite/f32.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn f32_bitwise_test() {
+        let path = Path::new("tests/testsuite/f32_bitwise.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn f64_test() {
+        let path = Path::new("tests/testsuite/f64.wast");
+        perform_wast(path);
+    }
+
+    #[test]
+    fn f64_bitwise_test() {
+        let path = Path::new("tests/testsuite/f64_bitwise.wast");
         perform_wast(path);
     }
 

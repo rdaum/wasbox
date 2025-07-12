@@ -22,6 +22,7 @@ Recent work has implemented structured control flow and fixed major execution is
 suites now pass:
 
 - ✅ **i32/i64 operations** - arithmetic, comparison, bitwise ops
+- ✅ **f32/f64 operations** - arithmetic with proper IEEE 754 compliance
 - ✅ **local variables** - get/set/tee operations
 - ✅ **constants** - all constant value operations
 - ✅ **control flow** - if/else, block, loop, br/br_if/br_table
@@ -33,7 +34,6 @@ Still missing (partial list):
 - Import/export binding and linking features
 - Reference types, tables, SIMD, GC extensions
 - Many edge cases and complex control flow scenarios
-- F32 NaN handling and IEEE 754 compliance
 - Optimization and performance tuning
 
 ### license

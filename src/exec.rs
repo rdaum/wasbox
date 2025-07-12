@@ -942,7 +942,7 @@ where
             }
             Op::F32Nearest => {
                 let value = frame.stack.pop_f32()?;
-                frame.stack.push_f32(value.round());
+                frame.stack.push_f32(value.round_ties_even());
             }
             Op::F32Sqrt => {
                 let value = frame.stack.pop_f32()?;
@@ -971,12 +971,22 @@ where
             Op::F32Min => {
                 let b = frame.stack.pop_f32()?;
                 let a = frame.stack.pop_f32()?;
-                frame.stack.push_f32(a.min(b));
+                let result = if a.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else {
+                    a.min(b)
+                };
+                frame.stack.push_f32(result);
             }
             Op::F32Max => {
                 let b = frame.stack.pop_f32()?;
                 let a = frame.stack.pop_f32()?;
-                frame.stack.push_f32(a.max(b));
+                let result = if a.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else {
+                    a.max(b)
+                };
+                frame.stack.push_f32(result);
             }
             Op::F32Copysign => {
                 let b = frame.stack.pop_f32()?;
@@ -1006,12 +1016,22 @@ where
             Op::F64Min => {
                 let b = frame.stack.pop_f64()?;
                 let a = frame.stack.pop_f64()?;
-                frame.stack.push_f64(a.min(b));
+                let result = if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else {
+                    a.min(b)
+                };
+                frame.stack.push_f64(result);
             }
             Op::F64Max => {
                 let b = frame.stack.pop_f64()?;
                 let a = frame.stack.pop_f64()?;
-                frame.stack.push_f64(a.max(b));
+                let result = if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else {
+                    a.max(b)
+                };
+                frame.stack.push_f64(result);
             }
             Op::F64Copysign => {
                 let b = frame.stack.pop_f64()?;
@@ -1040,7 +1060,7 @@ where
             }
             Op::F64Nearest => {
                 let value = frame.stack.pop_f64()?;
-                frame.stack.push_f64(value.round());
+                frame.stack.push_f64(value.round_ties_even());
             }
             Op::F64Sqrt => {
                 let value = frame.stack.pop_f64()?;
