@@ -134,15 +134,12 @@ mod tests {
             }
         }
         if !failures.is_empty() {
-            eprintln!("{} failures in {} files", failures.len(), attempts);
-            for (n, path, name, e, binary) in failures {
-                eprintln!("  {path:?}/{name:?} #{n} => {e:?}");
-                // Print module binary as hex
-                for (i, chunk) in binary.chunks(16).enumerate() {
-                    eprintln!("{:x}\t\t{:02x?}", i * 16, chunk);
-                }
+            let mut failure_summary =
+                format!("{} failures in {} attempts:\n", failures.len(), attempts);
+            for (n, path, name, e, _binary) in failures {
+                failure_summary.push_str(&format!("  {path:?}/{name:?} #{n} => {e:?}\n"));
             }
-            panic!("failures present");
+            panic!("{}", failure_summary);
         }
     }
 
@@ -153,7 +150,14 @@ mod tests {
             WastArg::Core(WastArgCore::F32(f)) => wasbox::Value::F32(f32::from_bits(f.bits)),
             WastArg::Core(WastArgCore::F64(f)) => wasbox::Value::F64(f64::from_bits(f.bits)),
             WastArg::Core(WastArgCore::RefExtern(r)) => wasbox::Value::ExternRef(Some(*r)),
-            WastArg::Core(WastArgCore::RefNull(_)) => wasbox::Value::ExternRef(None),
+            WastArg::Core(WastArgCore::RefNull(ref_type)) => {
+                // For now, just determine type based on context or default to ExternRef
+                // TODO: Check the actual heap type when we have better type info
+                match format!("{ref_type:?}").as_str() {
+                    s if s.contains("Func") => wasbox::Value::FuncRef(None),
+                    _ => wasbox::Value::ExternRef(None),
+                }
+            }
 
             _ => panic!("Unsupported arg type: {v:?}"),
         }
@@ -182,7 +186,13 @@ mod tests {
                 wasbox::Value::F64(f64::NAN)
             }
             WastRet::Core(WastRetCore::RefExtern(r)) => wasbox::Value::ExternRef(*r),
-            WastRet::Core(WastRetCore::RefNull(_)) => wasbox::Value::ExternRef(None),
+            WastRet::Core(WastRetCore::RefNull(ref_type)) => {
+                // Determine type based on context
+                match format!("{ref_type:?}").as_str() {
+                    s if s.contains("Func") => wasbox::Value::FuncRef(None),
+                    _ => wasbox::Value::ExternRef(None),
+                }
+            }
             _ => panic!("Unsupported ret type"),
         }
     }
@@ -326,6 +336,25 @@ mod tests {
                         ),
                     }
                 }
+                WastDirective::Invoke(WastInvoke {
+                    span: _,
+                    module: _,
+                    name,
+                    args,
+                }) => {
+                    let TestModule::Loaded(ref mut execution) = execution else {
+                        panic!("Expected a loaded module for invocation @ {linecol:?}");
+                    };
+                    let funcidx = execution
+                        .instance()
+                        .find_funcidx(name)
+                        .unwrap_or_else(|| panic!("Function not found: {name:?}"));
+
+                    let arg_set: Vec<_> = args.iter().map(convert_value).collect();
+                    execution.prepare(funcidx, &arg_set).unwrap();
+                    execution.run().unwrap();
+                    // For bare invoke, we don't check the result
+                }
                 _ => {}
             }
         }
@@ -335,6 +364,7 @@ mod tests {
     wast_test!(address_test, "address.wast");
     wast_test!(align_test, "align.wast");
     wast_test!(binary_test, "binary.wast");
+    wast_test!(binary_leb128_test, "binary-leb128.wast");
     wast_test!(block_test, "block.wast");
     wast_test!(br_test, "br.wast");
     wast_test!(br_if_test, "br_if.wast");
@@ -353,4 +383,7 @@ mod tests {
     wast_test!(local_get_test, "local_get.wast");
     wast_test!(local_set_test, "local_set.wast");
     wast_test!(loop_test, "loop.wast");
+    wast_test!(ref_func_test, "ref_func.wast");
+    wast_test!(ref_is_null_test, "ref_is_null.wast");
+    wast_test!(ref_null_test, "ref_null.wast");
 }

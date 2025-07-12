@@ -273,4 +273,12 @@ pub enum Op {
     I64Extend8S,
     I64Extend16S,
     I64Extend32S,
+
+    // Reference types proposal
+    RefNull(crate::ValueType),
+    RefFunc(u32),
+    RefIsNull,
+    RefAsNonNull,
+    RefEq,
+    SelectT(Vec<crate::ValueType>),
 }

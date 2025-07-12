@@ -137,14 +137,19 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
     for element_segment in &module.element_segments {
         if let crate::module::ElementMode::Active {
             table_index,
-            expr: _,
+            expr,
         } = &element_segment.mode
         {
             let table_idx = *table_index as usize;
             if table_idx < tables.len() {
                 if let crate::module::Elements::Function(func_indices) = &element_segment.elements {
-                    // For now, assume offset is 0 (we're not evaluating the init expression)
-                    let offset = 0;
+                    // Evaluate the init expression to get the offset
+                    let offset_value = exec_fragment(module.get_expr(expr), ValueType::I32)
+                        .map_err(LinkError::ActiveExpressionError)?;
+                    let Value::I32(offset) = offset_value else {
+                        panic!("Element segment offset must be i32");
+                    };
+                    let offset = offset as usize;
                     for (i, &func_idx) in func_indices.iter().enumerate() {
                         if offset + i < tables[table_idx].elements.len() {
                             tables[table_idx].elements[offset + i] =

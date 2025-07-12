@@ -831,16 +831,33 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 let table_index = reader.load_imm_varuint32()?;
                 prg.push(Op::TableSet(table_index));
             }
-            OpCode::SelectT
-            | OpCode::RefNull
-            | OpCode::IsNull
-            | OpCode::RefFunc
-            | OpCode::RefAsNonNull
-            | OpCode::RefEq => {
-                return Err(DecodeError::UnimplementedOpcode(
-                    opcode_o,
-                    "Reference types proposal not supported".to_string(),
-                ));
+            OpCode::SelectT => {
+                let type_count = reader.load_imm_varuint32()?;
+                let mut types = Vec::new();
+                for _ in 0..type_count {
+                    let type_byte = reader.load_imm_u8()?;
+                    let val_type = ValueType::from_u32(type_byte as u32)?;
+                    types.push(val_type);
+                }
+                prg.push(Op::SelectT(types));
+            }
+            OpCode::RefNull => {
+                let type_byte = reader.load_imm_u8()?;
+                let val_type = ValueType::from_u32(type_byte as u32)?;
+                prg.push(Op::RefNull(val_type));
+            }
+            OpCode::IsNull => {
+                prg.push(Op::RefIsNull);
+            }
+            OpCode::RefFunc => {
+                let func_index = reader.load_imm_varuint32()?;
+                prg.push(Op::RefFunc(func_index));
+            }
+            OpCode::RefAsNonNull => {
+                prg.push(Op::RefAsNonNull);
+            }
+            OpCode::RefEq => {
+                prg.push(Op::RefEq);
             }
 
             OpCode::Try | OpCode::Catch | OpCode::Throw | OpCode::Rethrow | OpCode::ThrowRef => {
@@ -915,11 +932,15 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
         // Block-stack... we need to keep track of the current block we're while decoding.
         match opcode {
             OpCode::Block | OpCode::Loop | OpCode::If => {
-                reader.load_imm_u8()?;
+                ValueType::read_signature(reader)?;
                 scope_stack.push(opcode);
             }
             OpCode::Else => {
                 if scope_stack.is_empty() {
+                    return Err(DecodeError::FailedToDecode("Else without If".to_string()));
+                }
+                let last_scope = scope_stack.last().unwrap();
+                if *last_scope != OpCode::If {
                     return Err(DecodeError::FailedToDecode("Else without If".to_string()));
                 }
             }
@@ -942,7 +963,9 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
             | OpCode::SetLocal
             | OpCode::Tee
             | OpCode::GetGlobal
-            | OpCode::SetGlobal => {
+            | OpCode::SetGlobal
+            | OpCode::Call
+            | OpCode::RefFunc => {
                 reader.load_imm_varuint32()?;
             }
             OpCode::CurrentMemorySize | OpCode::GrowMemory => {
@@ -994,19 +1017,8 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
             OpCode::F64Const => {
                 reader.load_imm_f64();
             }
-
-            OpCode::SelectT
-            | OpCode::TableGet
-            | OpCode::TableSet
-            | OpCode::RefNull
-            | OpCode::IsNull
-            | OpCode::RefFunc
-            | OpCode::RefAsNonNull
-            | OpCode::RefEq => {
-                return Err(DecodeError::UnimplementedOpcode(
-                    opcode_o,
-                    "Reference types proposal not supported".to_string(),
-                ));
+            OpCode::RefNull => {
+                reader.load_imm_u8()?;
             }
 
             OpCode::I32Extend8S

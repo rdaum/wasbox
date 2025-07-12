@@ -291,7 +291,11 @@ impl Module {
                             }
                             1 => {
                                 let kind = reader.load_imm_u8().map_err(DecoderError)?;
-                                let reftype = ReferenceType::from_u8(kind)?;
+                                let reftype = if kind == 0 {
+                                    ReferenceType::FuncRef
+                                } else {
+                                    ReferenceType::from_u8(kind)?
+                                };
                                 let num_func_indices =
                                     reader.load_imm_varuint32().map_err(DecoderError)?;
                                 let func_indices = (0..num_func_indices)
@@ -363,7 +367,11 @@ impl Module {
                             }
                             5 => {
                                 let kind = reader.load_imm_u8().map_err(DecoderError)?;
-                                let reftype = ReferenceType::from_u8(kind)?;
+                                let reftype = if kind == 0 {
+                                    ReferenceType::FuncRef
+                                } else {
+                                    ReferenceType::from_u8(kind)?
+                                };
                                 let num_elem_exprs =
                                     reader.load_imm_varuint32().map_err(DecoderError)?;
                                 let elem_exprs = (0..num_elem_exprs)
@@ -380,7 +388,11 @@ impl Module {
                                     reader.load_imm_varuint32().map_err(DecoderError)?;
                                 let init_expr = reader.load_expr().map_err(DecoderError)?;
                                 let kind = reader.load_imm_u8().map_err(DecoderError)?;
-                                let reftype = ReferenceType::from_u8(kind)?;
+                                let reftype = if kind == 0 {
+                                    ReferenceType::FuncRef
+                                } else {
+                                    ReferenceType::from_u8(kind)?
+                                };
                                 let num_elem_exprs =
                                     reader.load_imm_varuint32().map_err(DecoderError)?;
                                 let elem_exprs = (0..num_elem_exprs)
@@ -397,7 +409,11 @@ impl Module {
                             }
                             7 => {
                                 let kind = reader.load_imm_u8().map_err(DecoderError)?;
-                                let reftype = ReferenceType::from_u8(kind)?;
+                                let reftype = if kind == 0 {
+                                    ReferenceType::FuncRef
+                                } else {
+                                    ReferenceType::from_u8(kind)?
+                                };
                                 let num_elem_exprs =
                                     reader.load_imm_varuint32().map_err(DecoderError)?;
                                 let elem_exprs = (0..num_elem_exprs)

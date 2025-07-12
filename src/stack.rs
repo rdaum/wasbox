@@ -161,6 +161,24 @@ impl Stack {
             .map(f64::from_bits)
     }
 
+    pub fn push_ref(&mut self, value: Option<u32>) {
+        // Use u32::MAX to represent None, otherwise store the value
+        let encoded = match value {
+            Some(v) => v as u64,
+            None => u32::MAX as u64,
+        };
+        self.data.push(encoded);
+    }
+
+    pub fn pop_ref(&mut self) -> Result<Option<u32>, Fault> {
+        let raw = self.data.pop().ok_or(Fault::StackUnderflow)?;
+        if raw == u32::MAX as u64 {
+            Ok(None)
+        } else {
+            Ok(Some(raw as u32))
+        }
+    }
+
     pub fn pop_value(&mut self) -> Result<Value, Fault> {
         let raw = self.data.pop().ok_or(Fault::StackUnderflow)?;
         // For now, assume it's an i32 (could be improved to track types)

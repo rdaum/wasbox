@@ -71,6 +71,10 @@ pub enum Fault {
     CannotGrowMemory,
     /// Unresolvable type index
     UnresolvableTypeIndex(u32),
+    /// Invalid reference type
+    InvalidRefType,
+    /// Null reference dereference
+    NullReference,
 }
 
 impl Display for Fault {
@@ -85,6 +89,8 @@ impl Display for Fault {
             Fault::MemoryOutOfBounds => write!(f, "Memory out of bounds"),
             Fault::CannotGrowMemory => write!(f, "Cannot grow memory"),
             Fault::UnresolvableTypeIndex(idx) => write!(f, "Unresolvable type index: {idx}"),
+            Fault::InvalidRefType => write!(f, "Invalid reference type"),
+            Fault::NullReference => write!(f, "Null reference dereference"),
         }
     }
 }
@@ -414,11 +420,10 @@ where
                 }
                 match &table.elements[idx as usize] {
                     Some(value) => value.push_to(&mut frame.stack),
-                    None => frame.stack.push_u32(0), // null reference
+                    None => frame.stack.push_ref(None), // null reference
                 }
             }
             Op::TableSet(table_idx) => {
-                let value = frame.stack.pop_value()?;
                 let idx = frame.stack.pop_u32()?;
                 if table_idx as usize >= tables.len() {
                     return Err(Fault::GlobalIndexOutOfBounds);
@@ -427,6 +432,18 @@ where
                 if idx as usize >= table.elements.len() {
                     return Err(Fault::MemoryOutOfBounds);
                 }
+                
+                // Pop the appropriate type of value based on the table's reference type
+                let value = match table.ref_type {
+                    crate::module::ReferenceType::FuncRef => {
+                        let ref_val = frame.stack.pop_ref()?;
+                        Value::FuncRef(ref_val)
+                    }
+                    crate::module::ReferenceType::ExternRef => {
+                        let ref_val = frame.stack.pop_ref()?;
+                        Value::ExternRef(ref_val)
+                    }
+                };
                 table.elements[idx as usize] = Some(value);
             }
             Op::LoadI32(addr) => {
@@ -1188,6 +1205,48 @@ where
                 let value = frame.stack.pop_i64()?;
                 frame.stack.push_i64(value as i32 as i64);
             }
+
+            // Reference types operations
+            Op::RefNull(ref_type) => match ref_type {
+                crate::ValueType::FuncRef | crate::ValueType::ExternRef => {
+                    frame.stack.push_ref(None);
+                }
+                _ => return Err(Fault::InvalidRefType),
+            },
+            Op::RefFunc(func_index) => {
+                // TODO: Validate func_index exists in the module
+                frame.stack.push_ref(Some(func_index));
+            }
+            Op::RefIsNull => {
+                let ref_val = frame.stack.pop_ref()?;
+                let is_null = if ref_val.is_none() { 1 } else { 0 };
+                frame.stack.push_i32(is_null);
+            }
+            Op::RefAsNonNull => {
+                let ref_val = frame.stack.pop_ref()?;
+                match ref_val {
+                    Some(val) => frame.stack.push_ref(Some(val)),
+                    None => return Err(Fault::NullReference),
+                }
+            }
+            Op::RefEq => {
+                let ref2 = frame.stack.pop_ref()?;
+                let ref1 = frame.stack.pop_ref()?;
+                let are_equal = if ref1 == ref2 { 1 } else { 0 };
+                frame.stack.push_i32(are_equal);
+            }
+            Op::SelectT(ref _types) => {
+                // For now, implement same as regular select
+                // TODO: Add type validation
+                let condition = frame.stack.pop_i32()?;
+                let val2 = frame.stack.pop_u64()?;
+                let val1 = frame.stack.pop_u64()?;
+                if condition != 0 {
+                    frame.stack.push_u64(val1);
+                } else {
+                    frame.stack.push_u64(val2);
+                }
+            }
         }
     }
 }
@@ -1249,8 +1308,8 @@ impl Value {
                 let (l, r) = (stack.pop_u64()?, stack.pop_u64()?);
                 Value::V128((r as u128) << 64 | l as u128)
             }
-            ValueType::FuncRef => Value::FuncRef(Some(stack.pop_u32()?)),
-            ValueType::ExternRef => Value::ExternRef(Some(stack.pop_u32()?)),
+            ValueType::FuncRef => Value::FuncRef(stack.pop_ref()?),
+            ValueType::ExternRef => Value::ExternRef(stack.pop_ref()?),
         })
     }
 
@@ -1283,8 +1342,8 @@ impl Value {
                 stack.push_u64(*v as u64);
                 stack.push_u64((*v >> 64) as u64);
             }
-            Value::FuncRef(v) => stack.push_u32(v.unwrap_or(0)),
-            Value::ExternRef(v) => stack.push_u32(v.unwrap_or(0)),
+            Value::FuncRef(v) => stack.push_ref(*v),
+            Value::ExternRef(v) => stack.push_ref(*v),
             Value::Unit => {
                 stack.push_u64(0);
             }

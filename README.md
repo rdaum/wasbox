@@ -28,11 +28,12 @@ suites now pass:
 - ✅ **control flow** - if/else, block, loop, br/br_if/br_table
 - ✅ **function calls** - direct calls and basic call_indirect
 - ✅ **memory ops** - load/store for modules with memory
+- ✅ **reference types** 
 
 Still missing (partial list):
 
 - Import/export binding and linking features
-- Reference types, tables, SIMD, GC extensions
+- SIMD, GC extensions, some others
 - Many edge cases and complex control flow scenarios
 - Optimization and performance tuning
 
