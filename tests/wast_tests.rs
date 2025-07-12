@@ -38,6 +38,16 @@ mod tests {
         parser, QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastInvoke, WastRet, Wat,
     };
 
+    macro_rules! wast_test {
+        ($test_name:ident, $wast_file:literal) => {
+            #[test]
+            fn $test_name() {
+                let path = Path::new(concat!("tests/testsuite/", $wast_file));
+                perform_wast(path);
+            }
+        };
+    }
+
     enum DecodeResult {
         Success(()),
         Failure(LoaderError),
@@ -321,128 +331,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn address_test() {
-        let path = Path::new("tests/testsuite/address.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn binary_test() {
-        let path = Path::new("tests/testsuite/binary.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn align_test() {
-        let path = Path::new("tests/testsuite/align.wast");
-        perform_wast(path);
-    }
-    #[test]
-    fn data_test() {
-        let path = Path::new("tests/testsuite/data.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn br_test() {
-        let path = Path::new("tests/testsuite/br.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn br_if_test() {
-        let path = Path::new("tests/testsuite/br_if.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn br_table_test() {
-        let path = Path::new("tests/testsuite/br_table.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn block_test() {
-        let path = Path::new("tests/testsuite/block.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn loop_test() {
-        let path = Path::new("tests/testsuite/loop.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn if_test() {
-        let path = Path::new("tests/testsuite/if.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn call_test() {
-        let path = Path::new("tests/testsuite/call.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn i32_test() {
-        let path = Path::new("tests/testsuite/i32.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn i64_test() {
-        let path = Path::new("tests/testsuite/i64.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn local_get_test() {
-        let path = Path::new("tests/testsuite/local_get.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn local_set_test() {
-        let path = Path::new("tests/testsuite/local_set.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn global_test() {
-        let path = Path::new("tests/testsuite/global.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn f32_test() {
-        let path = Path::new("tests/testsuite/f32.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn f32_bitwise_test() {
-        let path = Path::new("tests/testsuite/f32_bitwise.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn f64_test() {
-        let path = Path::new("tests/testsuite/f64.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn f64_bitwise_test() {
-        let path = Path::new("tests/testsuite/f64_bitwise.wast");
-        perform_wast(path);
-    }
-
-    #[test]
-    fn const_test() {
-        let path = Path::new("tests/testsuite/const.wast");
-        perform_wast(path);
-    }
+    // WAST test suite tests
+    wast_test!(address_test, "address.wast");
+    wast_test!(align_test, "align.wast");
+    wast_test!(binary_test, "binary.wast");
+    wast_test!(block_test, "block.wast");
+    wast_test!(br_test, "br.wast");
+    wast_test!(br_if_test, "br_if.wast");
+    wast_test!(br_table_test, "br_table.wast");
+    wast_test!(call_test, "call.wast");
+    wast_test!(const_test, "const.wast");
+    wast_test!(data_test, "data.wast");
+    wast_test!(f32_test, "f32.wast");
+    wast_test!(f32_bitwise_test, "f32_bitwise.wast");
+    wast_test!(f64_test, "f64.wast");
+    wast_test!(f64_bitwise_test, "f64_bitwise.wast");
+    wast_test!(global_test, "global.wast");
+    wast_test!(i32_test, "i32.wast");
+    wast_test!(i64_test, "i64.wast");
+    wast_test!(if_test, "if.wast");
+    wast_test!(local_get_test, "local_get.wast");
+    wast_test!(local_set_test, "local_set.wast");
+    wast_test!(loop_test, "loop.wast");
 }
