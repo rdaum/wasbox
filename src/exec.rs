@@ -1,3 +1,16 @@
+// Copyright (C) 2025 Ryan Daum <ryan.daum@gmail.com> This program is free
+// software: you can redistribute it and/or modify it under the terms of the GNU
+// General Public License as published by the Free Software Foundation, version
+// 3.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along with
+// this program. If not, see <https://www.gnu.org/licenses/>.
+//
+
 // Copyright (C) 2024 Ryan Daum <ryan.daum@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify it under
@@ -101,7 +114,9 @@ fn execute_branch(frame: &mut Frame, depth: usize) -> Result<(), Fault> {
     // All scopes are valid branch targets: Block, Loop, Function, and IfElse
     let mut target_idx = None;
 
-    for (branch_target_count, (i, _control)) in frame.control_stack.iter().enumerate().rev().enumerate() {
+    for (branch_target_count, (i, _control)) in
+        frame.control_stack.iter().enumerate().rev().enumerate()
+    {
         // All control scopes are valid branch targets
         if branch_target_count == depth {
             target_idx = Some(i);
@@ -119,7 +134,6 @@ fn execute_branch(frame: &mut Frame, depth: usize) -> Result<(), Fault> {
     // Get the target control block's signature to know what values it expects
     let target_signature = frame.control_stack[target_idx].signature.clone();
     let target_stack_width = frame.control_stack[target_idx].stack_width;
-
 
     // Pop the branch values from the stack (these will be provided to the target)
     let branch_values = match &target_signature {
@@ -232,7 +246,6 @@ where
         }
         frame.pc += 1;
         let op = frame.program.ops[pc].clone();
-
 
         match op {
             Op::Nop => {}

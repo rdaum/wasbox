@@ -11,7 +11,7 @@ Written from scratch in Rust for scenarios where you need to run WASM modules as
 - Simple, understandable codebase without complex lifetimes
 
 I'm not focused on amazing performance, JITting, running big programs, WASI, fancy extensions or generally for running
-your dumb "smart contracts" - I'm just aiming for a simple solid VM for integrating bits of WASM execution into existing 
+your dumb "smart contracts" - I'm just aiming for a simple solid VM for integrating bits of WASM execution into existing
 tools and applications.
 
 **Work in progress - not ready for production use.**

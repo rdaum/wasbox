@@ -1,3 +1,16 @@
+// Copyright (C) 2025 Ryan Daum <ryan.daum@gmail.com> This program is free
+// software: you can redistribute it and/or modify it under the terms of the GNU
+// General Public License as published by the Free Software Foundation, version
+// 3.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along with
+// this program. If not, see <https://www.gnu.org/licenses/>.
+//
+
 // Copyright (C) 2024 Ryan Daum <ryan.daum@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify it under
@@ -15,7 +28,6 @@
 use crate::decode::scan;
 use crate::DecodeError;
 use std::io::{BufRead, Cursor, Read};
-use varint_rs::VarintReader;
 
 pub struct LEB128Reader<'a> {
     cursor: Cursor<&'a [u8]>,
@@ -42,6 +54,14 @@ impl<'a> LEB128Reader<'a> {
 
     pub fn advance(&mut self, offset: usize) {
         self.cursor.consume(offset);
+    }
+
+    fn read_byte(&mut self) -> Result<u8, DecodeError> {
+        let mut buf = [0u8; 1];
+        self.cursor.read_exact(&mut buf).map_err(|_| {
+            DecodeError::MalformedMemory("unexpected end of section or function".to_string())
+        })?;
+        Ok(buf[0])
     }
 }
 
@@ -92,12 +112,26 @@ impl LEB128Reader<'_> {
         Ok(string)
     }
     pub fn load_imm_varuint32(&mut self) -> Result<u32, DecodeError> {
-        self.cursor.read_u32_varint().map_err(|_| {
-            DecodeError::MalformedMemory(format!(
-                "Failed to decode varuint32 at offset {}",
-                self.cursor.position()
-            ))
-        })
+        let mut result = 0u32;
+        let mut shift = 0;
+
+        loop {
+            let byte = self.read_byte()?;
+            result |= ((byte & 0x7F) as u32) << shift;
+
+            if byte & 0x80 == 0 {
+                break;
+            }
+
+            shift += 7;
+            if shift >= 32 {
+                return Err(DecodeError::MalformedMemory(
+                    "integer representation too long".to_string(),
+                ));
+            }
+        }
+
+        Ok(result)
     }
 
     pub fn load_imm_varint32(&mut self) -> Result<i32, DecodeError> {
@@ -105,19 +139,13 @@ impl LEB128Reader<'_> {
         Ok(value as i32)
     }
 
-
     /// Read a signed LEB128 integer (for constants)
     pub fn load_imm_signed_varint32(&mut self) -> Result<i32, DecodeError> {
         let mut result = 0i32;
         let mut shift = 0;
 
         loop {
-            let byte: u8 = VarintReader::read(&mut self.cursor).map_err(|_| {
-                DecodeError::MalformedMemory(format!(
-                    "Failed to read byte for signed varint32 at offset {}",
-                    self.cursor.position()
-                ))
-            })?;
+            let byte = self.read_byte()?;
 
             // Extract the 7 data bits
             let value = (byte & 0x7F) as i32;
@@ -152,12 +180,7 @@ impl LEB128Reader<'_> {
         let mut shift = 0;
 
         loop {
-            let byte: u8 = VarintReader::read(&mut self.cursor).map_err(|_| {
-                DecodeError::MalformedMemory(format!(
-                    "Failed to read byte for signed varint64 at offset {}",
-                    self.cursor.position()
-                ))
-            })?;
+            let byte = self.read_byte()?;
 
             // Extract the 7 data bits
             let value = (byte & 0x7F) as i64;
@@ -187,22 +210,30 @@ impl LEB128Reader<'_> {
     }
 
     pub fn load_imm_varuint64(&mut self) -> Result<u64, DecodeError> {
-        self.cursor.read_u64_varint().map_err(|_| {
-            DecodeError::MalformedMemory(format!(
-                "Failed to decode varuint64 at offset {}",
-                self.cursor.position()
-            ))
-        })
+        let mut result = 0u64;
+        let mut shift = 0;
+
+        loop {
+            let byte = self.read_byte()?;
+            result |= ((byte & 0x7F) as u64) << shift;
+
+            if byte & 0x80 == 0 {
+                break;
+            }
+
+            shift += 7;
+            if shift >= 64 {
+                return Err(DecodeError::MalformedMemory(
+                    "integer representation too long".to_string(),
+                ));
+            }
+        }
+
+        Ok(result)
     }
 
     pub fn load_imm_u8(&mut self) -> Result<u8, DecodeError> {
-        let byte: u8 = VarintReader::read(&mut self.cursor).map_err(|_| {
-            DecodeError::MalformedMemory(format!(
-                "Failed to decode u8 at offset {}",
-                self.cursor.position()
-            ))
-        })?;
-        Ok(byte)
+        self.read_byte()
     }
     pub fn load_imm_f32(&mut self) -> Result<f32, DecodeError> {
         let mut f32_buffer = [0u8; 4];

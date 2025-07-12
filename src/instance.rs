@@ -1,3 +1,16 @@
+// Copyright (C) 2025 Ryan Daum <ryan.daum@gmail.com> This program is free
+// software: you can redistribute it and/or modify it under the terms of the GNU
+// General Public License as published by the Free Software Foundation, version
+// 3.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along with
+// this program. If not, see <https://www.gnu.org/licenses/>.
+//
+
 // Copyright (C) 2024 Ryan Daum <ryan.daum@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify it under
@@ -177,7 +190,8 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
                         panic!("Data segment offset must be i32");
                     };
                     let data_offset = data_offset as usize;
-                    memories[*memidx as usize].data_mut()[data_offset..data_offset + data.1 - data.0]
+                    memories[*memidx as usize].data_mut()
+                        [data_offset..data_offset + data.1 - data.0]
                         .copy_from_slice(&module.module_data[data.0..data.1]);
                 }
                 Data::Passive { data } => {
@@ -273,7 +287,7 @@ impl Instance {
         let program = &self.programs[index];
         let num_locals = program.local_types.len();
         let mut locals = args.to_vec();
-        
+
         // Initialize remaining local variables to their zero values based on their types
         for i in args.len()..num_locals {
             let local_type = program.local_types[i];
@@ -289,7 +303,7 @@ impl Instance {
             };
             locals.push(zero_value);
         }
-        
+
         let return_types = program.return_types.clone();
         let mut frame = Frame {
             locals,
