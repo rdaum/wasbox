@@ -145,7 +145,11 @@ impl Module {
 
                     for _ in 0..func_types {
                         let func_type_marker = reader.load_imm_u8().map_err(DecoderError)?;
-                        assert_eq!(0x60, func_type_marker);
+                        if func_type_marker != 0x60 {
+                            return Err(DecoderError(FailedToDecode(format!(
+                                "Invalid function type marker: expected 0x60, got 0x{func_type_marker:02x}"
+                            ))));
+                        }
 
                         let num_param_types = reader.load_imm_varuint32().map_err(DecoderError)?;
                         let mut params = Vec::with_capacity(num_param_types as usize);
@@ -493,8 +497,15 @@ impl Module {
                     start_function = Some(funcidx as usize);
                 }
                 SectionType::Custom => {
-                    // We skip custom sections
-                    reader.advance(section_length as usize);
+                    // Parse custom section to validate internal LEB128 encoding
+                    let section_end = reader.position() + section_length as usize;
+                    
+                    // Read and validate the custom section name
+                    let _name = reader.load_string().map_err(DecoderError)?;
+                    
+                    // Skip the rest of the custom section content
+                    let remaining = section_end - reader.position();
+                    reader.advance(remaining);
                 }
                 SectionType::DataCount => {
                     data_count = Some(reader.load_imm_varuint32().map_err(DecoderError)?);
