@@ -889,10 +889,24 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 ));
             }
             OpCode::FCExtension => {
-                return Err(DecodeError::UnimplementedOpcode(
-                    opcode_o,
-                    "Function call extension proposal not supported".to_string(),
-                ));
+                // FC extension contains nontrapping float-to-int conversions
+                let sub_opcode = reader.load_imm_varuint32()?;
+                match sub_opcode {
+                    0 => prg.push(Op::I32TruncSatF32S),
+                    1 => prg.push(Op::I32TruncSatF32U),
+                    2 => prg.push(Op::I32TruncSatF64S),
+                    3 => prg.push(Op::I32TruncSatF64U),
+                    4 => prg.push(Op::I64TruncSatF32S),
+                    5 => prg.push(Op::I64TruncSatF32U),
+                    6 => prg.push(Op::I64TruncSatF64S),
+                    7 => prg.push(Op::I64TruncSatF64U),
+                    _ => {
+                        return Err(DecodeError::UnimplementedOpcode(
+                            sub_opcode as u8,
+                            format!("FC extension sub-opcode {sub_opcode} not supported"),
+                        ));
+                    }
+                }
             }
             OpCode::SIMDExtension => {
                 return Err(DecodeError::UnimplementedOpcode(
@@ -1061,10 +1075,19 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
                 ));
             }
             OpCode::FCExtension => {
-                return Err(DecodeError::UnimplementedOpcode(
-                    opcode_o,
-                    "Function call extension proposal not supported".to_string(),
-                ));
+                // FC extension contains nontrapping float-to-int conversions
+                let sub_opcode = reader.load_imm_varuint32()?;
+                match sub_opcode {
+                    0..=7 => {
+                        // trunc_sat operations - just consume the sub-opcode
+                    }
+                    _ => {
+                        return Err(DecodeError::UnimplementedOpcode(
+                            sub_opcode as u8,
+                            format!("FC extension sub-opcode {sub_opcode} not supported"),
+                        ));
+                    }
+                }
             }
             OpCode::SIMDExtension => {
                 return Err(DecodeError::UnimplementedOpcode(

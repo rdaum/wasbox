@@ -119,14 +119,14 @@ impl LEB128Reader<'_> {
         loop {
             let byte = self.read_byte()?;
             byte_count += 1;
-            
+
             // Check if we've read too many bytes (max 5 bytes for 32-bit LEB128)
             if byte_count > 5 {
                 return Err(DecodeError::MalformedMemory(
                     "integer representation too long".to_string(),
                 ));
             }
-            
+
             result |= ((byte & 0x7F) as u32) << shift;
 
             if byte & 0x80 == 0 {
@@ -168,7 +168,7 @@ impl LEB128Reader<'_> {
         loop {
             let byte = self.read_byte()?;
             byte_count += 1;
-            
+
             // Check if we've read too many bytes (max 5 bytes for 32-bit LEB128)
             if byte_count > 5 {
                 return Err(DecodeError::MalformedMemory(
@@ -186,13 +186,12 @@ impl LEB128Reader<'_> {
                 let remaining_bits = 32 - shift;
                 if remaining_bits < 7 {
                     let data_bits = byte & 0x7F;
-                    
+
                     // For signed LEB128, check if the sign bit would be set
                     let sign_bit_position = remaining_bits - 1;
                     let sign_bit_mask = 1u8 << sign_bit_position;
                     let sign_bit = (data_bits & sign_bit_mask) != 0;
-                    
-                    
+
                     if sign_bit {
                         // Negative number: unused bits above the sign bit must be 1
                         let sign_extend_mask = 0x7F & (0x7F << remaining_bits);
@@ -211,7 +210,7 @@ impl LEB128Reader<'_> {
                         }
                     }
                 }
-                
+
                 // Sign extend if necessary
                 if shift < 32 && (byte & 0x40) != 0 {
                     let sign_extend_shift = shift + 7;
@@ -242,7 +241,7 @@ impl LEB128Reader<'_> {
         loop {
             let byte = self.read_byte()?;
             byte_count += 1;
-            
+
             // Check if we've read too many bytes (max 10 bytes for 64-bit LEB128)
             if byte_count > 10 {
                 return Err(DecodeError::MalformedMemory(
@@ -260,12 +259,12 @@ impl LEB128Reader<'_> {
                 let remaining_bits = 64 - shift;
                 if remaining_bits < 7 {
                     let data_bits = byte & 0x7F;
-                    
+
                     // For signed LEB128, check if the sign bit would be set
                     let sign_bit_position = remaining_bits - 1;
                     let sign_bit_mask = 1u8 << sign_bit_position;
                     let sign_bit = (data_bits & sign_bit_mask) != 0;
-                    
+
                     if sign_bit {
                         // Negative number: unused bits above the sign bit must be 1
                         let sign_extend_mask = 0x7F & (0x7F << remaining_bits);
@@ -284,7 +283,7 @@ impl LEB128Reader<'_> {
                         }
                     }
                 }
-                
+
                 // Sign extend if necessary
                 if shift < 64 && (byte & 0x40) != 0 {
                     let sign_extend_shift = shift + 7;
@@ -314,14 +313,14 @@ impl LEB128Reader<'_> {
         loop {
             let byte = self.read_byte()?;
             byte_count += 1;
-            
+
             // Check if we've read too many bytes (max 10 bytes for 64-bit LEB128)
             if byte_count > 10 {
                 return Err(DecodeError::MalformedMemory(
                     "integer representation too long".to_string(),
                 ));
             }
-            
+
             result |= ((byte & 0x7F) as u64) << shift;
 
             if byte & 0x80 == 0 {

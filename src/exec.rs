@@ -432,7 +432,7 @@ where
                 if idx as usize >= table.elements.len() {
                     return Err(Fault::MemoryOutOfBounds);
                 }
-                
+
                 // Pop the appropriate type of value based on the table's reference type
                 let value = match table.ref_type {
                     crate::module::ReferenceType::FuncRef => {
@@ -581,19 +581,23 @@ where
                 frame.stack.push_u64(v.to_bits());
             }
             Op::MemorySize => {
-                let size = memory.size();
-                frame.stack.push_u32(size as u32);
+                let size_in_bytes = memory.size();
+                let size_in_pages = size_in_bytes / WASM_PAGE_SIZE;
+                frame.stack.push_u32(size_in_pages as u32);
             }
             Op::MemoryGrow => {
                 let delta = frame.stack.pop_i32()?;
                 if delta < 0 {
-                    return Err(Fault::CannotGrowMemory);
+                    frame.stack.push_i32(-1);
+                } else {
+                    let current_size = memory.size();
+                    let old_page_count = current_size / WASM_PAGE_SIZE;
+                    let new_size = current_size + (delta as usize * WASM_PAGE_SIZE);
+                    match memory.grow(new_size) {
+                        Ok(_) => frame.stack.push_i32(old_page_count as i32),
+                        Err(_) => frame.stack.push_i32(-1),
+                    }
                 }
-                let current_size = memory.size();
-                let old_page_count = current_size / WASM_PAGE_SIZE;
-                let new_size = current_size + (delta as usize * WASM_PAGE_SIZE);
-                memory.grow(new_size)?;
-                frame.stack.push_i32(old_page_count as i32);
             }
             Op::I32Eqz => {
                 let value = frame.stack.pop_i32()?;
@@ -1129,6 +1133,105 @@ where
                 let value = frame.stack.pop_f64()?;
                 frame.stack.push_u64(value as u64);
             }
+
+            // Saturating truncation operations
+            Op::I32TruncSatF32S => {
+                let value = frame.stack.pop_f32()?;
+                let result = if value.is_nan() {
+                    0
+                } else if value <= (i32::MIN as f32) {
+                    i32::MIN
+                } else if value >= (i32::MAX as f32) {
+                    i32::MAX
+                } else {
+                    value as i32
+                };
+                frame.stack.push_i32(result);
+            }
+            Op::I32TruncSatF32U => {
+                let value = frame.stack.pop_f32()?;
+                let result = if value.is_nan() || value < 0.0 {
+                    0
+                } else if value >= (u32::MAX as f32) {
+                    u32::MAX
+                } else {
+                    value as u32
+                };
+                frame.stack.push_u32(result);
+            }
+            Op::I32TruncSatF64S => {
+                let value = frame.stack.pop_f64()?;
+                let result = if value.is_nan() {
+                    0
+                } else if value <= (i32::MIN as f64) {
+                    i32::MIN
+                } else if value >= (i32::MAX as f64) {
+                    i32::MAX
+                } else {
+                    value as i32
+                };
+                frame.stack.push_i32(result);
+            }
+            Op::I32TruncSatF64U => {
+                let value = frame.stack.pop_f64()?;
+                let result = if value.is_nan() || value < 0.0 {
+                    0
+                } else if value >= (u32::MAX as f64) {
+                    u32::MAX
+                } else {
+                    value as u32
+                };
+                frame.stack.push_u32(result);
+            }
+            Op::I64TruncSatF32S => {
+                let value = frame.stack.pop_f32()?;
+                let result = if value.is_nan() {
+                    0
+                } else if value <= (i64::MIN as f32) {
+                    i64::MIN
+                } else if value >= (i64::MAX as f32) {
+                    i64::MAX
+                } else {
+                    value as i64
+                };
+                frame.stack.push_i64(result);
+            }
+            Op::I64TruncSatF32U => {
+                let value = frame.stack.pop_f32()?;
+                let result = if value.is_nan() || value < 0.0 {
+                    0
+                } else if value >= (u64::MAX as f32) {
+                    u64::MAX
+                } else {
+                    value as u64
+                };
+                frame.stack.push_u64(result);
+            }
+            Op::I64TruncSatF64S => {
+                let value = frame.stack.pop_f64()?;
+                let result = if value.is_nan() {
+                    0
+                } else if value <= (i64::MIN as f64) {
+                    i64::MIN
+                } else if value >= (i64::MAX as f64) {
+                    i64::MAX
+                } else {
+                    value as i64
+                };
+                frame.stack.push_i64(result);
+            }
+            Op::I64TruncSatF64U => {
+                let value = frame.stack.pop_f64()?;
+                let result = if value.is_nan() || value < 0.0 {
+                    0
+                } else if value >= (u64::MAX as f64) {
+                    u64::MAX
+                } else {
+                    value as u64
+                };
+                frame.stack.push_u64(result);
+            }
+
             Op::F32ConvertI32S => {
                 let value = frame.stack.pop_i32()?;
                 frame.stack.push_f32(value as f32);

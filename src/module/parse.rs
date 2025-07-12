@@ -59,12 +59,6 @@ fn read_limits(reader: &mut LEB128Reader) -> Result<(u32, Option<u32>), DecodeEr
     };
 
     let limits = (initial, maximum);
-    // There has to be at least 1 page of memory.
-    if limits.0 == 0 {
-        return Err(MalformedMemory(
-            "Memory limits must be at least 1 page".to_string(),
-        ));
-    }
     // If the limits is malformed (too large, etc.), that's a problem.
     if limits.0 > MAX_MEMORY_SIZE_PAGES {
         return Err(MalformedMemory("Memory limits are too large".to_string()));
@@ -499,10 +493,10 @@ impl Module {
                 SectionType::Custom => {
                     // Parse custom section to validate internal LEB128 encoding
                     let section_end = reader.position() + section_length as usize;
-                    
+
                     // Read and validate the custom section name
                     let _name = reader.load_string().map_err(DecoderError)?;
-                    
+
                     // Skip the rest of the custom section content
                     let remaining = section_end - reader.position();
                     reader.advance(remaining);

@@ -251,6 +251,16 @@ pub enum Op {
     I64TruncF64S,
     I64TruncF64U,
 
+    // Nontrapping float-to-int conversions (FC extension)
+    I32TruncSatF32S,
+    I32TruncSatF32U,
+    I32TruncSatF64S,
+    I32TruncSatF64U,
+    I64TruncSatF32S,
+    I64TruncSatF32U,
+    I64TruncSatF64S,
+    I64TruncSatF64U,
+
     F32ConvertI32S,
     F32ConvertI32U,
     F32ConvertI64S,

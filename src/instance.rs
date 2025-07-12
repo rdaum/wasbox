@@ -135,11 +135,7 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
 
     // Apply active element segments to initialize tables
     for element_segment in &module.element_segments {
-        if let crate::module::ElementMode::Active {
-            table_index,
-            expr,
-        } = &element_segment.mode
-        {
+        if let crate::module::ElementMode::Active { table_index, expr } = &element_segment.mode {
             let table_idx = *table_index as usize;
             if table_idx < tables.len() {
                 if let crate::module::Elements::Function(func_indices) = &element_segment.elements {
