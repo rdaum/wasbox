@@ -206,7 +206,7 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
         // Block-stack... we need to keep track of the current block we're while decoding.
         match opcode {
             OpCode::Unreachable => {
-                continue;
+                prg.push(Op::Unreachable);
             }
             OpCode::Nop => {
                 prg.push(Op::Nop);

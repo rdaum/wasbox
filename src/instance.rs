@@ -218,13 +218,43 @@ pub fn mk_instance(module: Module) -> Result<Instance, LinkError> {
         });
     }
 
-    Ok(Instance {
+    let instance = Instance {
         module,
         memories,
         globals,
         programs,
         tables,
-    })
+    };
+
+    // Execute start function if present
+    if let Some(start_func_idx) = instance.module.start_function {
+        // Create execution context and run the start function
+        use crate::{Execution, VectorMemory};
+
+        let memory = if !instance.memories.is_empty() {
+            instance.memories[0].clone()
+        } else {
+            VectorMemory::new(0, None)
+        };
+
+        let mut execution = Execution::new(instance, memory);
+        execution
+            .prepare(start_func_idx as u32, &[])
+            .map_err(|e| match e {
+                crate::exec::ExecError::ExecutionFault(f) => LinkError::ActiveExpressionError(f),
+                crate::exec::ExecError::LinkageError(l) => l,
+            })?;
+        execution.run().map_err(|e| match e {
+            crate::exec::ExecError::ExecutionFault(f) => LinkError::ActiveExpressionError(f),
+            crate::exec::ExecError::LinkageError(l) => l,
+        })?;
+
+        // Extract the instance back from execution and return it
+        let updated_instance = execution.into_instance_with_memory();
+        Ok(updated_instance)
+    } else {
+        Ok(instance)
+    }
 }
 
 impl Instance {

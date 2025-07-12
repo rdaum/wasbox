@@ -470,4 +470,54 @@ mod tests {
     wast_test!(float_exprs_test, "float_exprs.wast");
     wast_test!(labels_test, "labels.wast");
     wast_test!(left_to_right_test, "left-to-right.wast");
+
+    #[test]
+    fn test_start_function_execution() {
+        // WASM module with start function that increments memory 3 times
+        let wasm_bytes = wat::parse_str(
+            r#"
+            (module
+              (memory (data "A"))
+              (func $inc
+                (i32.store8
+                  (i32.const 0)
+                  (i32.add
+                    (i32.load8_u (i32.const 0))
+                    (i32.const 1)
+                  )
+                )
+              )
+              (func $get (result i32)
+                (return (i32.load8_u (i32.const 0)))
+              )
+              (func $main
+                (call $inc)
+                (call $inc)
+                (call $inc)
+              )
+              (start $main)
+              (export "get" (func $get))
+            )
+        "#,
+        )
+        .unwrap();
+
+        // Load and instantiate module (start function should run automatically)
+        let module = wasbox::Module::load(&wasm_bytes).unwrap();
+        let instance = wasbox::mk_instance(module).unwrap();
+
+        // Create execution context and call the get function
+        let memory = instance.memories[0].clone();
+        let mut execution = wasbox::Execution::new(instance, memory);
+
+        // Find the "get" function and call it
+        let get_func_idx = execution.instance().find_funcidx("get").unwrap();
+        execution.prepare(get_func_idx, &[]).unwrap();
+        execution.run().unwrap();
+
+        // Check that the result is 68 (65 + 3 increments)
+        let result = execution.result().unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], wasbox::Value::I32(68));
+    }
 }

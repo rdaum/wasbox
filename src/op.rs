@@ -40,6 +40,7 @@ pub struct MemArg {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     Nop,
+    Unreachable,
 
     // Control flow.
     /// Block->End

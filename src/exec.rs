@@ -87,6 +87,8 @@ pub enum Fault {
     InvalidConversion,
     /// Indirect call type mismatch
     IndirectCallTypeMismatch,
+    /// Unreachable instruction executed
+    Unreachable,
 }
 
 impl Display for Fault {
@@ -109,6 +111,7 @@ impl Display for Fault {
             Fault::UninitializedElement => write!(f, "uninitialized element"),
             Fault::InvalidConversion => write!(f, "invalid conversion to integer"),
             Fault::IndirectCallTypeMismatch => write!(f, "indirect call type mismatch"),
+            Fault::Unreachable => write!(f, "unreachable"),
         }
     }
 }
@@ -397,6 +400,9 @@ where
 
         match op {
             Op::Nop => {}
+            Op::Unreachable => {
+                return Err(Fault::Unreachable);
+            }
             Op::StartScope(sig, scope_type) => {
                 let resolved_type = resolve_type(types, sig)?;
                 frame.push_control(resolved_type, scope_type);
@@ -1783,6 +1789,22 @@ where
 
     pub fn instance(&self) -> &Instance {
         &self.instance
+    }
+
+    pub fn into_instance(self) -> Instance {
+        self.instance
+    }
+
+    pub fn into_instance_with_memory(self) -> Instance
+    where
+        M: Into<crate::VectorMemory>,
+    {
+        let mut instance = self.instance;
+        // Update the instance's memory with the execution's memory
+        if !instance.memories.is_empty() {
+            instance.memories[0] = self.memory.into();
+        }
+        instance
     }
 
     pub fn result(&self) -> Option<&[Value]> {
