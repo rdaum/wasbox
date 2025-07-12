@@ -272,10 +272,9 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 prg.push(Op::Call(index));
             }
             OpCode::CallIndirect => {
-                let index = reader.load_imm_varuint32()?;
-                let _table = reader.load_imm_varuint32()?;
-                assert_eq!(0, _table);
-                prg.push(Op::CallIndirect(index));
+                let type_idx = reader.load_imm_varuint32()?;
+                let table_idx = reader.load_imm_varuint32()?;
+                prg.push(Op::CallIndirect(type_idx, table_idx));
             }
             OpCode::Drop => {
                 prg.push(Op::Drop);

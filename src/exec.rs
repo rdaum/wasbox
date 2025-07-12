@@ -345,16 +345,15 @@ where
             Op::Call(c) => {
                 return Ok(Continuation::Call(c));
             }
-            Op::CallIndirect(_sig) => {
-                // In indirect, we pop the table index from the stack.
-                // TODO: do something with `sig` ?
+            Op::CallIndirect(_type_idx, table_idx) => {
+                // Pop the table index from the stack (the actual index to use)
                 let table_index = frame.stack.pop_u32()?;
 
-                // Look up the function reference in the table
-                if tables.is_empty() {
-                    return Err(Fault::MemoryOutOfBounds); // No tables available
+                // Look up the function reference in the specified table
+                if table_idx as usize >= tables.len() {
+                    return Err(Fault::MemoryOutOfBounds); // Table index out of bounds
                 }
-                let table = &tables[0]; // Assume table 0 for now
+                let table = &tables[table_idx as usize];
 
                 if table_index as usize >= table.elements.len() {
                     return Err(Fault::MemoryOutOfBounds); // Table index out of bounds
@@ -362,6 +361,7 @@ where
 
                 match &table.elements[table_index as usize] {
                     Some(Value::FuncRef(Some(func_index))) => {
+                        // TODO: Verify function signature matches type_idx
                         return Ok(Continuation::Call(*func_index));
                     }
                     Some(Value::FuncRef(None)) => {
@@ -373,17 +373,17 @@ where
                 }
             }
             Op::Drop => {
-                frame.stack.pop_u32()?;
+                frame.stack.pop_u64()?;
             }
             Op::Select => {
                 //The select instruction returns its first operand if $condition is true, or its second operand otherwise.
-                let condition = frame.stack.pop_u32()?;
-                let val2 = frame.stack.pop_u32()?; // Second operand (popped first)
-                let val1 = frame.stack.pop_u32()?; // First operand (popped second)
+                let condition = frame.stack.pop_i32()?;
+                let val2 = frame.stack.pop_u64()?; // Second operand (popped first)
+                let val1 = frame.stack.pop_u64()?; // First operand (popped second)
                 if condition != 0 {
-                    frame.stack.push_u32(val1); // Return first operand if condition is true
+                    frame.stack.push_u64(val1); // Return first operand if condition is true
                 } else {
-                    frame.stack.push_u32(val2); // Return second operand if condition is false
+                    frame.stack.push_u64(val2); // Return second operand if condition is false
                 }
             }
             Op::GetLocal(idx) => {

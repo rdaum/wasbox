@@ -386,4 +386,7 @@ mod tests {
     wast_test!(ref_func_test, "ref_func.wast");
     wast_test!(ref_is_null_test, "ref_is_null.wast");
     wast_test!(ref_null_test, "ref_null.wast");
+    wast_test!(nop_test, "nop.wast");
+    wast_test!(return_test, "return.wast");
+    wast_test!(select_test, "select.wast");
 }

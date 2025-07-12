@@ -56,7 +56,7 @@ pub enum Op {
 
     // Calls
     Call(u32),
-    CallIndirect(u32),
+    CallIndirect(u32, u32), // (type_idx, table_idx)
 
     Drop,
     Select,
