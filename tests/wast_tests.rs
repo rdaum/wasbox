@@ -355,6 +355,57 @@ mod tests {
                     execution.run().unwrap();
                     // For bare invoke, we don't check the result
                 }
+                WastDirective::AssertTrap { exec, message, .. } => match exec {
+                    WastExecute::Invoke(WastInvoke {
+                        span: _,
+                        module: _,
+                        name,
+                        args,
+                    }) => {
+                        let TestModule::Loaded(ref mut execution) = execution else {
+                            panic!("Expected a loaded module for invocation @ {linecol:?}");
+                        };
+                        let funcidx = execution
+                            .instance()
+                            .find_funcidx(name)
+                            .unwrap_or_else(|| panic!("Function not found: {name:?}"));
+
+                        let arg_set: Vec<_> = args.iter().map(convert_value).collect();
+                        execution.prepare(funcidx, &arg_set).unwrap();
+                        let result = execution.run();
+                        
+                        // We expect this to fail with a trap
+                        match result {
+                            Err(wasbox::ExecError::ExecutionFault(fault)) => {
+                                let fault_message = fault.to_string();
+                                let expected_message = message.to_string();
+                                // Check if the fault message is compatible with the expected message
+                                let is_compatible = match (expected_message.as_str(), fault_message.as_str()) {
+                                    ("out of bounds memory access", "Memory out of bounds") => true,
+                                    ("integer overflow", "integer overflow") => true,
+                                    ("invalid conversion to integer", "invalid conversion to integer") => true,
+                                    (expected, actual) if actual.contains(expected) => true,
+                                    (expected, actual) if expected.contains(actual) => true,
+                                    _ => false,
+                                };
+                                assert!(
+                                    is_compatible,
+                                    "Expected trap message '{}', got '{}' for directive #{directive_num} @ {linecol:?}",
+                                    expected_message, fault_message
+                                );
+                            }
+                            Ok(_) => panic!(
+                                "Expected trap with message '{}', but execution succeeded for directive #{directive_num} @ {linecol:?}",
+                                message
+                            ),
+                            Err(other) => panic!(
+                                "Expected trap with message '{}', but got different error: {:?} for directive #{directive_num} @ {linecol:?}",
+                                message, other
+                            ),
+                        }
+                    }
+                    _ => panic!("Unsupported exec directive in assert_trap: {exec:?} @ {linecol:?}"),
+                }
                 _ => {}
             }
         }
@@ -401,7 +452,7 @@ mod tests {
     wast_test!(conversions_test, "conversions.wast");
     wast_test!(memory_test, "memory.wast");
     wast_test!(memory_size_test, "memory_size.wast");
-    // wast_test!(memory_grow_test, "memory_grow.wast");
+    // wast_test!(memory_grow_test, "memory_grow.wast"); // TODO: Stack underflow issue
     wast_test!(elem_test, "elem.wast");
     wast_test!(table_test, "table.wast");
     wast_test!(exports_test, "exports.wast");

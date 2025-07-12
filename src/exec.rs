@@ -75,6 +75,16 @@ pub enum Fault {
     InvalidRefType,
     /// Null reference dereference
     NullReference,
+    /// Integer division by zero
+    IntegerDivisionByZero,
+    /// Integer overflow
+    IntegerOverflow,
+    /// Undefined element
+    UndefinedElement,
+    /// Uninitialized element
+    UninitializedElement,
+    /// Invalid conversion to integer
+    InvalidConversion,
 }
 
 impl Display for Fault {
@@ -91,11 +101,139 @@ impl Display for Fault {
             Fault::UnresolvableTypeIndex(idx) => write!(f, "Unresolvable type index: {idx}"),
             Fault::InvalidRefType => write!(f, "Invalid reference type"),
             Fault::NullReference => write!(f, "Null reference dereference"),
+            Fault::IntegerDivisionByZero => write!(f, "integer divide by zero"),
+            Fault::IntegerOverflow => write!(f, "integer overflow"),
+            Fault::UndefinedElement => write!(f, "undefined element"),
+            Fault::UninitializedElement => write!(f, "uninitialized element"),
+            Fault::InvalidConversion => write!(f, "invalid conversion to integer"),
         }
     }
 }
 
 impl Error for Fault {}
+
+/// Helper function for WASM float-to-signed-int truncation
+/// WASM spec: i32.trunc_f32_s traps if value is NaN, ±∞, or outside [-2^31, 2^31)
+fn trunc_f32_to_i32(value: f32) -> Result<i32, Fault> {
+    if value.is_nan() {
+        return Err(Fault::InvalidConversion);
+    }
+    if value.is_infinite() {
+        return Err(Fault::IntegerOverflow);
+    }
+    // WASM spec: Use exact bounds from wasm3 reference implementation
+    // i32.trunc_f32_s: RMIN = -2147483904.0f, RMAX = 2147483648.0f
+    if value <= -2147483904.0f32 || value >= 2147483648.0f32 {
+        return Err(Fault::IntegerOverflow);
+    }
+    Ok(value.trunc() as i32)
+}
+
+/// Helper function for WASM float-to-unsigned-int truncation
+/// WASM spec: i32.trunc_f32_u traps if value is NaN, ±∞, or outside [0, 2^32)
+fn trunc_f32_to_u32(value: f32) -> Result<u32, Fault> {
+    if value.is_nan() {
+        return Err(Fault::InvalidConversion);
+    }
+    if value.is_infinite() {
+        return Err(Fault::IntegerOverflow);
+    }
+    // WASM spec: Use exact bounds from wasm3 - i32.trunc_f32_u
+    if value <= -1.0f32 || value >= 4294967296.0f32 {
+        return Err(Fault::IntegerOverflow);
+    }
+    Ok(value.trunc() as u32)
+}
+
+/// WASM spec: i32.trunc_f64_s traps if value is NaN, ±∞, or outside [-2^31, 2^31)
+fn trunc_f64_to_i32(value: f64) -> Result<i32, Fault> {
+    if value.is_nan() {
+        return Err(Fault::InvalidConversion);
+    }
+    if value.is_infinite() {
+        return Err(Fault::IntegerOverflow);
+    }
+    // WASM spec: Use exact bounds from wasm3 - i32.trunc_f64_s
+    if value <= -2147483649.0 || value >= 2147483648.0 {
+        return Err(Fault::IntegerOverflow);
+    }
+    Ok(value.trunc() as i32)
+}
+
+/// WASM spec: i32.trunc_f64_u traps if value is NaN, ±∞, or outside [0, 2^32)
+fn trunc_f64_to_u32(value: f64) -> Result<u32, Fault> {
+    if value.is_nan() {
+        return Err(Fault::InvalidConversion);
+    }
+    if value.is_infinite() {
+        return Err(Fault::IntegerOverflow);
+    }
+    // WASM spec: Use exact bounds from wasm3 - i32.trunc_f64_u
+    if value <= -1.0 || value >= 4294967296.0 {
+        return Err(Fault::IntegerOverflow);
+    }
+    Ok(value.trunc() as u32)
+}
+
+/// WASM spec: i64.trunc_f32_s traps if value is NaN, ±∞, or outside [-2^63, 2^63)
+fn trunc_f32_to_i64(value: f32) -> Result<i64, Fault> {
+    if value.is_nan() {
+        return Err(Fault::InvalidConversion);
+    }
+    if value.is_infinite() {
+        return Err(Fault::IntegerOverflow);
+    }
+    // WASM spec: Use exact bounds from wasm3 - i64.trunc_f32_s
+    if value <= -9223373136366403584.0f32 || value >= 9223372036854775808.0f32 {
+        return Err(Fault::IntegerOverflow);
+    }
+    Ok(value.trunc() as i64)
+}
+
+/// WASM spec: i64.trunc_f32_u traps if value is NaN, ±∞, or outside [0, 2^64)
+fn trunc_f32_to_u64(value: f32) -> Result<u64, Fault> {
+    if value.is_nan() {
+        return Err(Fault::InvalidConversion);
+    }
+    if value.is_infinite() {
+        return Err(Fault::IntegerOverflow);
+    }
+    // WASM spec: Use exact bounds from wasm3 - i64.trunc_f32_u
+    if value <= -1.0f32 || value >= 18446744073709551616.0f32 {
+        return Err(Fault::IntegerOverflow);
+    }
+    Ok(value.trunc() as u64)
+}
+
+/// WASM spec: i64.trunc_f64_s traps if value is NaN, ±∞, or outside [-2^63, 2^63)
+fn trunc_f64_to_i64(value: f64) -> Result<i64, Fault> {
+    if value.is_nan() {
+        return Err(Fault::InvalidConversion);
+    }
+    if value.is_infinite() {
+        return Err(Fault::IntegerOverflow);
+    }
+    // WASM spec: Use exact bounds from wasm3 - i64.trunc_f64_s
+    if value <= -9223372036854777856.0 || value >= 9223372036854775808.0 {
+        return Err(Fault::IntegerOverflow);
+    }
+    Ok(value.trunc() as i64)
+}
+
+/// WASM spec: i64.trunc_f64_u traps if value is NaN, ±∞, or outside [0, 2^64)
+fn trunc_f64_to_u64(value: f64) -> Result<u64, Fault> {
+    if value.is_nan() {
+        return Err(Fault::InvalidConversion);
+    }
+    if value.is_infinite() {
+        return Err(Fault::IntegerOverflow);
+    }
+    // WASM spec: Use exact bounds from wasm3 - i64.trunc_f64_u
+    if value <= -1.0 || value >= 18446744073709551616.0 {
+        return Err(Fault::IntegerOverflow);
+    }
+    Ok(value.trunc() as u64)
+}
 
 fn resolve_type(types: &[FuncType], ts: TypeSignature) -> Result<Type, Fault> {
     match ts {
@@ -797,22 +935,47 @@ where
             Op::I32DivS => {
                 let b = frame.stack.pop_i32()?;
                 let a = frame.stack.pop_i32()?;
-                frame.stack.push_i32(a.wrapping_div(b));
+                match a.checked_div(b) {
+                    Some(result) => frame.stack.push_i32(result),
+                    None => {
+                        if b == 0 {
+                            return Err(Fault::IntegerDivisionByZero);
+                        } else {
+                            return Err(Fault::IntegerOverflow);
+                        }
+                    }
+                }
             }
             Op::I32DivU => {
                 let b = frame.stack.pop_u32()?;
                 let a = frame.stack.pop_u32()?;
-                frame.stack.push_u32(a.wrapping_div(b));
+                match a.checked_div(b) {
+                    Some(result) => frame.stack.push_u32(result),
+                    None => return Err(Fault::IntegerDivisionByZero),
+                }
             }
             Op::I32RemS => {
                 let b = frame.stack.pop_i32()?;
                 let a = frame.stack.pop_i32()?;
-                frame.stack.push_i32(a.wrapping_rem(b));
+                match a.checked_rem(b) {
+                    Some(result) => frame.stack.push_i32(result),
+                    None => {
+                        if b == 0 {
+                            return Err(Fault::IntegerDivisionByZero);
+                        } else {
+                            // i32::MIN % -1 = 0 by WASM spec
+                            frame.stack.push_i32(0);
+                        }
+                    }
+                }
             }
             Op::I32RemU => {
                 let b = frame.stack.pop_u32()?;
                 let a = frame.stack.pop_u32()?;
-                frame.stack.push_u32(a.wrapping_rem(b));
+                match a.checked_rem(b) {
+                    Some(result) => frame.stack.push_u32(result),
+                    None => return Err(Fault::IntegerDivisionByZero),
+                }
             }
             Op::I32And => {
                 let b = frame.stack.pop_i32()?;
@@ -884,22 +1047,47 @@ where
             Op::I64DivS => {
                 let b = frame.stack.pop_i64()?;
                 let a = frame.stack.pop_i64()?;
-                frame.stack.push_i64(a.wrapping_div(b));
+                match a.checked_div(b) {
+                    Some(result) => frame.stack.push_i64(result),
+                    None => {
+                        if b == 0 {
+                            return Err(Fault::IntegerDivisionByZero);
+                        } else {
+                            return Err(Fault::IntegerOverflow);
+                        }
+                    }
+                }
             }
             Op::I64DivU => {
                 let b = frame.stack.pop_u64()?;
                 let a = frame.stack.pop_u64()?;
-                frame.stack.push_u64(a.wrapping_div(b));
+                match a.checked_div(b) {
+                    Some(result) => frame.stack.push_u64(result),
+                    None => return Err(Fault::IntegerDivisionByZero),
+                }
             }
             Op::I64RemS => {
                 let b = frame.stack.pop_i64()?;
                 let a = frame.stack.pop_i64()?;
-                frame.stack.push_i64(a.wrapping_rem(b));
+                match a.checked_rem(b) {
+                    Some(result) => frame.stack.push_i64(result),
+                    None => {
+                        if b == 0 {
+                            return Err(Fault::IntegerDivisionByZero);
+                        } else {
+                            // i64::MIN % -1 = 0 by WASM spec
+                            frame.stack.push_i64(0);
+                        }
+                    }
+                }
             }
             Op::I64RemU => {
                 let b = frame.stack.pop_u64()?;
                 let a = frame.stack.pop_u64()?;
-                frame.stack.push_u64(a.wrapping_rem(b));
+                match a.checked_rem(b) {
+                    Some(result) => frame.stack.push_u64(result),
+                    None => return Err(Fault::IntegerDivisionByZero),
+                }
             }
             Op::I64And => {
                 let b = frame.stack.pop_i64()?;
@@ -1095,19 +1283,23 @@ where
             }
             Op::I32TruncF32S => {
                 let value = frame.stack.pop_f32()?;
-                frame.stack.push_i32(value as i32);
+                let result = trunc_f32_to_i32(value)?;
+                frame.stack.push_i32(result);
             }
             Op::I32TruncF32U => {
                 let value = frame.stack.pop_f32()?;
-                frame.stack.push_u32(value as u32);
+                let result = trunc_f32_to_u32(value)?;
+                frame.stack.push_u32(result);
             }
             Op::I32TruncF64S => {
                 let value = frame.stack.pop_f64()?;
-                frame.stack.push_i32(value as i32);
+                let result = trunc_f64_to_i32(value)?;
+                frame.stack.push_i32(result);
             }
             Op::I32TruncF64U => {
                 let value = frame.stack.pop_f64()?;
-                frame.stack.push_u32(value as u32);
+                let result = trunc_f64_to_u32(value)?;
+                frame.stack.push_u32(result);
             }
             Op::I64ExtendI32S => {
                 let value = frame.stack.pop_i32()?;
@@ -1119,19 +1311,23 @@ where
             }
             Op::I64TruncF32S => {
                 let value = frame.stack.pop_f32()?;
-                frame.stack.push_i64(value as i64);
+                let result = trunc_f32_to_i64(value)?;
+                frame.stack.push_i64(result);
             }
             Op::I64TruncF32U => {
                 let value = frame.stack.pop_f32()?;
-                frame.stack.push_u64(value as u64);
+                let result = trunc_f32_to_u64(value)?;
+                frame.stack.push_u64(result);
             }
             Op::I64TruncF64S => {
                 let value = frame.stack.pop_f64()?;
-                frame.stack.push_i64(value as i64);
+                let result = trunc_f64_to_i64(value)?;
+                frame.stack.push_i64(result);
             }
             Op::I64TruncF64U => {
                 let value = frame.stack.pop_f64()?;
-                frame.stack.push_u64(value as u64);
+                let result = trunc_f64_to_u64(value)?;
+                frame.stack.push_u64(result);
             }
 
             // Saturating truncation operations
