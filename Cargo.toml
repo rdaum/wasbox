@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dev-dependencies]
-wast = "235.0"
-wat = "1.0.0"
+wast = "238.0"
+wat = "1.238"
 
 [dependencies]
 strum = "0.26"
