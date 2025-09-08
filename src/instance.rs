@@ -14,7 +14,7 @@
 use crate::decode::{decode, Program, ScopeType};
 use crate::exec::{eval_init_expr, Fault, GlobalVar, Value};
 use crate::frame::Frame;
-use crate::import::{ImportedFunction, ImportResolver};
+use crate::import::{ImportResolver, ImportedFunction};
 use crate::module::{Data, ReferenceType};
 use crate::stack::Stack;
 use crate::{DecodeError, Module, Type, ValueType, VectorMemory};
@@ -78,7 +78,7 @@ pub fn mk_instance_with_imports(
     let mut imported_globals = Vec::new();
     let mut imported_tables = Vec::new();
     let mut imported_memories = Vec::new();
-    
+
     for (module_name, field_name, import) in &module.imports {
         match import {
             crate::module::Import::Func(_type_idx) => {
@@ -121,7 +121,13 @@ pub fn mk_instance_with_imports(
     }
 
     // Create instance with the resolved imports
-    mk_instance_internal(module, imported_functions, imported_globals, imported_tables, imported_memories)
+    mk_instance_internal(
+        module,
+        imported_functions,
+        imported_globals,
+        imported_tables,
+        imported_memories,
+    )
 }
 
 /// Produce an instance from a module.
@@ -138,15 +144,18 @@ fn mk_instance_internal(
     imported_memories: Vec<VectorMemory>,
 ) -> Result<Instance, LinkError> {
     // Check if this module has any imports
-    let has_imports = !imported_functions.is_empty() || !imported_globals.is_empty() || !imported_tables.is_empty() || !imported_memories.is_empty();
-    
+    let has_imports = !imported_functions.is_empty()
+        || !imported_globals.is_empty()
+        || !imported_tables.is_empty()
+        || !imported_memories.is_empty();
+
     // Create imported globals context first for initialization expressions
     let mut imported_global_vars = Vec::new();
     for imported_global in &imported_globals {
         let dummy_decl = crate::module::Global {
             ty: imported_global.type_of(),
             mutable: false, // TODO: Get actual mutability from import declaration
-            expr: (0, 0), // Empty expression range
+            expr: (0, 0),   // Empty expression range
         };
         imported_global_vars.push(GlobalVar {
             decl: dummy_decl,
@@ -178,32 +187,26 @@ fn mk_instance_internal(
 
     // Initialize memories: imported memories first, then local memories
     let mut memories: Vec<_> = imported_memories.into_iter().collect();
-    memories.extend(module
-        .memories
-        .iter()
-        .map(|m_decl| {
-            let min_pages = m_decl.limits.0;
-            let max_pages = m_decl.limits.1;
-            VectorMemory::new(
-                min_pages as usize * WASM_PAGE_SIZE,
-                max_pages.map(|x| x as usize * WASM_PAGE_SIZE),
-            )
-        }));
+    memories.extend(module.memories.iter().map(|m_decl| {
+        let min_pages = m_decl.limits.0;
+        let max_pages = m_decl.limits.1;
+        VectorMemory::new(
+            min_pages as usize * WASM_PAGE_SIZE,
+            max_pages.map(|x| x as usize * WASM_PAGE_SIZE),
+        )
+    }));
 
     // Initialize tables: imported tables first, then local tables
     let mut tables: Vec<_> = imported_tables.into_iter().collect();
-    tables.extend(module
-        .tables
-        .iter()
-        .map(|t_decl| {
-            let min_size = t_decl.limits.0;
-            let max_size = t_decl.limits.1;
-            TableInstance {
-                elements: vec![None; min_size as usize],
-                ref_type: t_decl.ty,
-                limits: (min_size, max_size),
-            }
-        }));
+    tables.extend(module.tables.iter().map(|t_decl| {
+        let min_size = t_decl.limits.0;
+        let max_size = t_decl.limits.1;
+        TableInstance {
+            elements: vec![None; min_size as usize],
+            ref_type: t_decl.ty,
+            limits: (min_size, max_size),
+        }
+    }));
 
     // Apply active element segments to initialize tables
     for element_segment in &module.element_segments {
@@ -221,11 +224,24 @@ fn mk_instance_internal(
                             }
                         }
                         function_types.extend_from_slice(&module.functions);
-                        eval_init_expr(module.get_expr(expr), ValueType::I32, &imported_global_vars, &module.types, &function_types)
+                        eval_init_expr(
+                            module.get_expr(expr),
+                            ValueType::I32,
+                            &imported_global_vars,
+                            &module.types,
+                            &function_types,
+                        )
                     } else {
                         // Even without imports, we need to pass function information for ref.func to work
-                        eval_init_expr(module.get_expr(expr), ValueType::I32, &[], &module.types, &module.functions)
-                    }.map_err(LinkError::ActiveExpressionError)?;
+                        eval_init_expr(
+                            module.get_expr(expr),
+                            ValueType::I32,
+                            &[],
+                            &module.types,
+                            &module.functions,
+                        )
+                    }
+                    .map_err(LinkError::ActiveExpressionError)?;
                     let Value::I32(offset) = offset_value else {
                         panic!("Element segment offset must be i32");
                     };
@@ -264,11 +280,24 @@ fn mk_instance_internal(
                             }
                         }
                         function_types.extend_from_slice(&module.functions);
-                        eval_init_expr(module.get_expr(expr), ValueType::I32, &imported_global_vars, &module.types, &function_types)
+                        eval_init_expr(
+                            module.get_expr(expr),
+                            ValueType::I32,
+                            &imported_global_vars,
+                            &module.types,
+                            &function_types,
+                        )
                     } else {
                         // Even without imports, we need to pass function information for ref.func to work
-                        eval_init_expr(module.get_expr(expr), ValueType::I32, &[], &module.types, &module.functions)
-                    }.map_err(LinkError::ActiveExpressionError)?;
+                        eval_init_expr(
+                            module.get_expr(expr),
+                            ValueType::I32,
+                            &[],
+                            &module.types,
+                            &module.functions,
+                        )
+                    }
+                    .map_err(LinkError::ActiveExpressionError)?;
                     let Value::I32(data_offset) = data_offset else {
                         panic!("Data segment offset must be i32");
                     };
@@ -290,11 +319,24 @@ fn mk_instance_internal(
                             }
                         }
                         function_types.extend_from_slice(&module.functions);
-                        eval_init_expr(module.get_expr(expr), ValueType::I32, &imported_global_vars, &module.types, &function_types)
+                        eval_init_expr(
+                            module.get_expr(expr),
+                            ValueType::I32,
+                            &imported_global_vars,
+                            &module.types,
+                            &function_types,
+                        )
                     } else {
                         // Even without imports, we need to pass function information for ref.func to work
-                        eval_init_expr(module.get_expr(expr), ValueType::I32, &[], &module.types, &module.functions)
-                    }.map_err(LinkError::ActiveExpressionError)?;
+                        eval_init_expr(
+                            module.get_expr(expr),
+                            ValueType::I32,
+                            &[],
+                            &module.types,
+                            &module.functions,
+                        )
+                    }
+                    .map_err(LinkError::ActiveExpressionError)?;
                     let Value::I32(data_offset) = data_offset else {
                         panic!("Data segment offset must be i32");
                     };
@@ -315,10 +357,10 @@ fn mk_instance_internal(
 
     // Populate globals: imported globals first, then local globals
     let mut globals = Vec::with_capacity(imported_globals.len() + module.globals.len());
-    
+
     // Add imported globals first (reuse the ones we created for initialization context)
     globals.extend(imported_global_vars.iter().cloned());
-    
+
     // Then add local globals
     for global_segment in &module.globals {
         // Execute the expression in the global
@@ -332,11 +374,24 @@ fn mk_instance_internal(
                 }
             }
             function_types.extend_from_slice(&module.functions);
-            eval_init_expr(program, global_segment.ty, &imported_global_vars, &module.types, &function_types)
+            eval_init_expr(
+                program,
+                global_segment.ty,
+                &imported_global_vars,
+                &module.types,
+                &function_types,
+            )
         } else {
             // Even without imports, we need to pass function information for ref.func to work
-            eval_init_expr(program, global_segment.ty, &[], &module.types, &module.functions)
-        }.map_err(LinkError::ActiveExpressionError)?;
+            eval_init_expr(
+                program,
+                global_segment.ty,
+                &[],
+                &module.types,
+                &module.functions,
+            )
+        }
+        .map_err(LinkError::ActiveExpressionError)?;
         globals.push(GlobalVar {
             decl: global_segment.clone(),
             value: result,
@@ -412,7 +467,7 @@ impl Instance {
                 _ => continue,
             }
         }
-        
+
         // If index is within imported functions range, we can't create a frame for it
         // (imported functions are dispatched via continuation mechanism)
         if index < num_imported_funcs {

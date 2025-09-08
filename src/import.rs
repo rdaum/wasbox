@@ -22,4 +22,3 @@ pub trait ImportResolver {
     fn resolve_table(&self, module: &str, field: &str) -> Option<TableInstance>;
     fn resolve_memory(&self, module: &str, field: &str) -> Option<VectorMemory>;
 }
-

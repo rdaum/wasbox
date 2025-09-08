@@ -237,7 +237,11 @@ impl Module {
                                 let is_mut = match mut_byte {
                                     0 => false,
                                     1 => true,
-                                    _ => return Err(LoaderError::DecoderError(DecodeError::MalformedMutability(mut_byte))),
+                                    _ => {
+                                        return Err(LoaderError::DecoderError(
+                                            DecodeError::MalformedMutability(mut_byte),
+                                        ))
+                                    }
                                 };
                                 Import::Global(valtype, is_mut)
                             }
@@ -440,7 +444,11 @@ impl Module {
                         let mutable = match mut_flag {
                             0 => false,
                             1 => true,
-                            _ => return Err(LoaderError::DecoderError(DecodeError::MalformedMutability(mut_flag))),
+                            _ => {
+                                return Err(LoaderError::DecoderError(
+                                    DecodeError::MalformedMutability(mut_flag),
+                                ))
+                            }
                         };
                         let expr = reader.load_expr().map_err(DecoderError)?;
                         globals.push(Global { ty, mutable, expr });

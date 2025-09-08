@@ -13,12 +13,12 @@
 
 use crate::decode::{decode, ScopeType};
 use crate::frame::Frame;
-use crate::import::{HostFunction, ImportedFunction, ImportResolver};
-use crate::module::Module;
+use crate::import::{HostFunction, ImportResolver, ImportedFunction};
 use crate::instance::{LinkError, TableInstance, WASM_PAGE_SIZE};
 use crate::memory::Memory;
 use crate::memory::SliceMemory;
 use crate::module::Global;
+use crate::module::Module;
 use crate::op::{MemArg, Op};
 use crate::stack::Stack;
 use crate::{FuncType, Instance, Type, TypeSignature, ValueType};
@@ -33,7 +33,10 @@ const EXPR_TICK_LIMIT: usize = 1 << 10;
 pub enum Continuation {
     Call(u32),
     /// Call to function in another module
-    CallExternal { module_id: u32, func_id: u32 },
+    CallExternal {
+        module_id: u32,
+        func_id: u32,
+    },
     /// Call to host function
     CallHost(HostFunction),
     /// Program ran out of instructions
@@ -48,7 +51,10 @@ impl Debug for Continuation {
         match self {
             Continuation::Call(idx) => write!(f, "Call({idx})"),
             Continuation::CallExternal { module_id, func_id } => {
-                write!(f, "CallExternal {{ module_id: {module_id}, func_id: {func_id} }}")
+                write!(
+                    f,
+                    "CallExternal {{ module_id: {module_id}, func_id: {func_id} }}"
+                )
             }
             Continuation::CallHost(_) => write!(f, "CallHost(<host_function>)"),
             Continuation::ProgramEnd => write!(f, "ProgramEnd"),
@@ -523,7 +529,7 @@ where
                             return Err(Fault::UnresolvableTypeIndex(_type_idx));
                         }
                         let expected_type = &types[_type_idx as usize];
-                        
+
                         // Get the actual function type from the functions array
                         // The functions array maps function indices to their type indices
                         if (*func_index as usize) >= functions.len() {
@@ -534,12 +540,14 @@ where
                             return Err(Fault::UnresolvableTypeIndex(actual_type_idx as u32));
                         }
                         let actual_type = &types[actual_type_idx];
-                        
+
                         // Check if the function signatures match
-                        if expected_type.params != actual_type.params || expected_type.results != actual_type.results {
+                        if expected_type.params != actual_type.params
+                            || expected_type.results != actual_type.results
+                        {
                             return Err(Fault::IndirectCallTypeMismatch);
                         }
-                        
+
                         return Ok(Continuation::Call(*func_index));
                     }
                     Some(Value::FuncRef(None)) => {
@@ -606,7 +614,7 @@ where
                     return Err(Fault::GlobalIndexOutOfBounds);
                 }
                 let table = &mut tables[table_idx as usize];
-                
+
                 // Pop the appropriate type of value based on the table's reference type
                 let value = match table.ref_type {
                     crate::module::ReferenceType::FuncRef => {
@@ -618,7 +626,7 @@ where
                         Value::ExternRef(ref_val)
                     }
                 };
-                
+
                 let idx = frame.stack.pop_u32()?;
                 if idx as usize >= table.elements.len() {
                     return Err(Fault::MemoryOutOfBounds);
@@ -1715,10 +1723,14 @@ impl Value {
     }
 }
 
-
-
 /// Evaluate an initialization expression with access to imported globals
-pub(crate) fn eval_init_expr(program: &[u8], return_type: ValueType, imported_globals: &[GlobalVar], types: &[crate::FuncType], functions: &[usize]) -> Result<Value, Fault> {
+pub(crate) fn eval_init_expr(
+    program: &[u8],
+    return_type: ValueType,
+    imported_globals: &[GlobalVar],
+    types: &[crate::FuncType],
+    functions: &[usize],
+) -> Result<Value, Fault> {
     let const_program = decode(program).unwrap();
     let return_types = vec![return_type];
     let mut global_exec_frame = Frame {
@@ -1734,7 +1746,7 @@ pub(crate) fn eval_init_expr(program: &[u8], return_type: ValueType, imported_gl
     //   to one page.
     let mut const_prg_memory_vec = vec![0; WASM_PAGE_SIZE];
     let mut const_prg_memory = SliceMemory::new(&mut const_prg_memory_vec);
-    
+
     // Create a globals context that includes imported globals
     let mut const_prg_globals = imported_globals.to_vec();
 
@@ -1775,7 +1787,6 @@ impl Display for ExecError {
 }
 
 impl Error for ExecError {}
-
 
 /// Multi-module execution state that manages multiple instances and their execution
 pub struct ExecutionState<M>
@@ -1857,7 +1868,7 @@ where
         self.result.as_deref()
     }
 
-    pub fn take_module(&mut self, module_id: u32) -> Option<Instance> 
+    pub fn take_module(&mut self, module_id: u32) -> Option<Instance>
     where
         M: Clone + Into<crate::VectorMemory>,
     {
@@ -1874,16 +1885,26 @@ where
 
     pub fn into_single_module(self) -> Option<Instance> {
         if self.modules.len() == 1 {
-            self.modules.into_iter().next().map(|(_, instance)| instance)
+            self.modules
+                .into_iter()
+                .next()
+                .map(|(_, instance)| instance)
         } else {
             None
         }
     }
 
-    pub fn prepare(&mut self, module_id: u32, funcidx: u32, args: &[Value]) -> Result<(), ExecError> {
-        let instance = self.modules.get(&module_id)
+    pub fn prepare(
+        &mut self,
+        module_id: u32,
+        funcidx: u32,
+        args: &[Value],
+    ) -> Result<(), ExecError> {
+        let instance = self
+            .modules
+            .get(&module_id)
             .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
-        
+
         let frame = instance
             .frame_for_funcidx(funcidx, args)
             .map_err(ExecError::LinkageError)?;
@@ -1901,25 +1922,25 @@ where
 
             let (current_module_id, _) = self.frame_stack.last().unwrap();
             let current_module_id = *current_module_id;
-            
+
             // Execute current frame
             let result = {
                 let (_, frame) = self.frame_stack.last_mut().unwrap();
                 let module = self.modules.get_mut(&current_module_id).unwrap();
-                
+
                 // Build complete function index space that includes both imported and local functions
                 let mut function_type_mapping = Vec::new();
-                
+
                 // Add imported functions first
                 for (_, _, import) in module.module.imports.iter() {
                     if let crate::module::Import::Func(type_idx) = import {
                         function_type_mapping.push(*type_idx as usize);
                     }
                 }
-                
+
                 // Then add local functions
                 function_type_mapping.extend(module.module.functions.iter().copied());
-                
+
                 execute(
                     frame,
                     &mut self.memory,
@@ -1932,23 +1953,26 @@ where
             };
 
             let mut continuation = result;
-            
+
             // Handle continuations in a loop to support recursive calls
             loop {
                 match continuation {
                     Ok(Continuation::ProgramEnd) | Ok(Continuation::DoneReturn) => {
                         // Handle function return
                         let (_, completed_frame) = self.frame_stack.pop().unwrap();
-                        
+
                         // Collect return values
-                        let mut return_values = vec![(ValueType::Unit, Value::Unit); completed_frame.return_types.len()];
+                        let mut return_values = vec![
+                            (ValueType::Unit, Value::Unit);
+                            completed_frame.return_types.len()
+                        ];
                         let mut temp_stack = completed_frame.stack;
                         for (i, rt) in completed_frame.return_types.iter().enumerate().rev() {
                             let value = Value::pop_from(*rt, &mut temp_stack)
                                 .map_err(ExecError::ExecutionFault)?;
                             return_values[i] = (*rt, value);
                         }
-                        
+
                         if let Some((_, caller_frame)) = self.frame_stack.last_mut() {
                             // Push return values to caller's stack
                             for (_, v) in return_values {
@@ -1965,7 +1989,7 @@ where
                         // Function call - check if it's imported or local
                         let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                         let module = self.modules.get(&current_module_id).unwrap();
-                        
+
                         // Check if this is an imported function
                         let num_imported_funcs = module.imported_functions.len() as u32;
                         if funcidx < num_imported_funcs {
@@ -1989,7 +2013,10 @@ where
                                         }
                                     }
                                 }
-                                ImportedFunction::Module { module_id, func_idx } => {
+                                ImportedFunction::Module {
+                                    module_id,
+                                    func_idx,
+                                } => {
                                     // Inter-module call
                                     continuation = Ok(Continuation::CallExternal {
                                         module_id: *module_id,
@@ -2003,19 +2030,21 @@ where
                             let local_func_idx = funcidx - num_imported_funcs;
                             let func_index = local_func_idx as usize;
                             if func_index >= module.module.functions.len() {
-                                return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
+                                return Err(ExecError::ExecutionFault(
+                                    Fault::GlobalIndexOutOfBounds,
+                                ));
                             }
-                            
+
                             let type_idx = module.module.functions[func_index];
                             let func_type = &module.module.types[type_idx];
-                            
+
                             let mut args = vec![Value::Unit; func_type.params.len()];
                             for (i, param_type) in func_type.params.iter().enumerate().rev() {
                                 let value = Value::pop_from(*param_type, &mut current_frame.stack)
                                     .map_err(ExecError::ExecutionFault)?;
                                 args[i] = value;
                             }
-                            
+
                             // Create new frame for the called function
                             let frame = module
                                 .frame_for_funcidx(funcidx, &args)
@@ -2027,25 +2056,27 @@ where
                     Ok(Continuation::CallExternal { module_id, func_id }) => {
                         // Inter-module call
                         let (_, current_frame) = self.frame_stack.last_mut().unwrap();
-                        let target_module = self.modules.get(&module_id)
+                        let target_module = self
+                            .modules
+                            .get(&module_id)
                             .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
-                        
+
                         // Get function signature and pop arguments
                         let func_index = func_id as usize;
                         if func_index >= target_module.module.functions.len() {
                             return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
                         }
-                        
+
                         let type_idx = target_module.module.functions[func_index];
                         let func_type = &target_module.module.types[type_idx];
-                        
+
                         let mut args = vec![Value::Unit; func_type.params.len()];
                         for (i, param_type) in func_type.params.iter().enumerate().rev() {
                             let value = Value::pop_from(*param_type, &mut current_frame.stack)
                                 .map_err(ExecError::ExecutionFault)?;
                             args[i] = value;
                         }
-                        
+
                         // Create new frame in target module
                         let frame = target_module
                             .frame_for_funcidx(func_id, &args)
@@ -2056,10 +2087,11 @@ where
                     Ok(Continuation::CallHost(host_func)) => {
                         // Handle host function call
                         let (_, current_frame) = self.frame_stack.last_mut().unwrap();
-                        
+
                         // Call the host function with the current stack
-                        let result = host_func(&mut current_frame.stack).map_err(ExecError::ExecutionFault)?;
-                        
+                        let result = host_func(&mut current_frame.stack)
+                            .map_err(ExecError::ExecutionFault)?;
+
                         // Host functions typically return ProgramEnd, but we should handle other continuations
                         match result {
                             Continuation::ProgramEnd => {
@@ -2084,24 +2116,23 @@ where
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use crate::exec::{ExecutionState, Value};
     use crate::instance::mk_instance;
-    use crate::module::Module;
     use crate::memory::VectorMemory;
+    use crate::module::Module;
 
     #[test]
     fn load_run_itoa_with_execution_state() {
         let module_data: Vec<u8> = include_bytes!("../tests/itoa.wasm").to_vec();
         let module = Module::load(&module_data).unwrap();
         let linked = mk_instance(module).unwrap();
-        
+
         // Use the linked module's memory instead of creating a new one
         let memory = linked.memories[0].clone();
         let mut exec_state = ExecutionState::new(memory);
-        
+
         // Add the module and run the itoa function
         exec_state.add_module(0, linked);
         exec_state.prepare(0, 1, &[Value::I32(123)]).unwrap();
@@ -2113,18 +2144,18 @@ mod tests {
         let module_data: Vec<u8> = include_bytes!("../tests/itoa.wasm").to_vec();
         let module = Module::load(&module_data).unwrap();
         let linked = mk_instance(module).unwrap();
-        
+
         // Use the linked module's memory instead of creating a new one
         let memory = linked.memories[0].clone();
         let mut exec_state = ExecutionState::new(memory);
-        
+
         // Add the module to the execution state
         exec_state.add_module(0, linked);
-        
+
         // Prepare and run a function
         exec_state.prepare(0, 1, &[Value::I32(123)]).unwrap();
         exec_state.run().unwrap();
-        
+
         // Should have executed successfully
         assert_eq!(exec_state.frame_stack_len(), 0);
     }
@@ -2134,15 +2165,15 @@ mod tests {
         let module_data: Vec<u8> = include_bytes!("../tests/itoa.wasm").to_vec();
         let module = Module::load(&module_data).unwrap();
         let linked = mk_instance(module).unwrap();
-        
+
         let memory = VectorMemory::new(1, None);
         let mut exec_state = ExecutionState::new(memory);
-        
+
         // Test adding and retrieving modules
         exec_state.add_module(42, linked);
         assert!(exec_state.get_module(42).is_some());
         assert!(exec_state.get_module(99).is_none());
-        
+
         // Test mutable access
         assert!(exec_state.get_module_mut(42).is_some());
         assert!(exec_state.get_module_mut(99).is_none());
@@ -2152,7 +2183,7 @@ mod tests {
     fn test_execution_state_empty_run() {
         let memory = VectorMemory::new(1, None);
         let mut exec_state = ExecutionState::<VectorMemory>::new(memory);
-        
+
         // Running with no frames should return immediately
         let result = exec_state.run();
         assert!(result.is_ok());
@@ -2163,7 +2194,7 @@ mod tests {
     fn test_execution_state_nonexistent_module() {
         let memory = VectorMemory::new(1, None);
         let mut exec_state = ExecutionState::<VectorMemory>::new(memory);
-        
+
         // Try to prepare a function in a non-existent module
         let result = exec_state.prepare(999, 0, &[]);
         assert!(result.is_err());
