@@ -51,6 +51,22 @@ The current WAST expansion work is targeting:
 
 WAST files tied to unsupported proposals (SIMD, GC, exceptions, typed-function-references/tail-call, memory64) are intentionally left out for now.
 
+## Benchmarking
+
+This repo includes two benchmark entry points:
+
+- Cross-runtime runner (`wasbox` vs `wasmtime`):
+  - `cargo run --release --bin bench_runner -- --engine both --warmup 250 --iters 2000`
+  - Optional: `--case <name>` (repeatable), `--list`, and `--csv <path>`.
+- Criterion benches (internal `wasbox` tuning):
+  - `cargo bench --bench runtime`
+
+The cross-runtime runner uses a small built-in suite of deterministic WAT programs and reports:
+
+- module instantiate time
+- total execute time over N iterations
+- mean execute time per iteration
+
 ## License
 
 GPL-3.0.

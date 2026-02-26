@@ -25,6 +25,7 @@
 //!          MAYBE GC proposal, but not sure yet
 
 mod decode;
+pub mod bench_suite;
 mod exec;
 mod frame;
 mod import;

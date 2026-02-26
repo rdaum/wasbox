@@ -4,9 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dev-dependencies]
+criterion = "0.5"
 wast = "238.0"
 wat = "1.238"
 
 [dependencies]
 strum = "0.26"
 strum_macros = "0.26"
+wasmtime = "30"
+wat = "1.238"
+
+[[bench]]
+name = "runtime"
+harness = false
