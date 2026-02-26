@@ -16,6 +16,7 @@ use crate::module::{
     Code, Data, ElementMode, ElementSegment, Elements, ExportEntry, Import, ImportExportKind,
     MemorySection, ReferenceType, Region, SectionType, Table,
 };
+use crate::op::Op;
 use crate::DecodeError::{FailedToDecode, InvalidDataSegmentType, MalformedMemory};
 use crate::LoaderError::DecoderError;
 use crate::{DecodeError, FuncType, Global, LoaderError, Module, ValueType};
@@ -672,6 +673,26 @@ impl Module {
                 return Err(DecoderError(FailedToDecode(
                     "Data count does not match the number of data segments".to_string(),
                 )));
+            }
+        } else {
+            // memory.init and data.drop require a data count section.
+            for function in &code {
+                let body = &module_data[function.code.0..function.code.1];
+                if !body.contains(&0xfc) {
+                    continue;
+                }
+                let Ok(program) = crate::decode::decode(body) else {
+                    continue;
+                };
+                if program
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, Op::MemoryInit(_, _) | Op::DataDrop(_)))
+                {
+                    return Err(DecoderError(FailedToDecode(
+                        "data count section required".to_string(),
+                    )));
+                }
             }
         }
 

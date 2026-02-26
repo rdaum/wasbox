@@ -41,6 +41,7 @@ fn register_detached_snapshot(
     programs: &[Program],
     tables: &[TableInstance],
     element_segments: &[Option<Vec<Value>>],
+    data_segments: &[Option<Vec<u8>>],
 ) {
     register_detached_instance(Instance {
         owner_id,
@@ -50,6 +51,7 @@ fn register_detached_snapshot(
         programs: programs.to_vec(),
         tables: tables.to_vec(),
         element_segments: element_segments.to_vec(),
+        data_segments: data_segments.to_vec(),
         imported_functions: vec![],
     });
 }
@@ -98,6 +100,7 @@ pub struct Instance {
     pub programs: Vec<Program>,
     pub tables: Vec<TableInstance>,
     pub element_segments: Vec<Option<Vec<Value>>>,
+    pub data_segments: Vec<Option<Vec<u8>>>,
     pub imported_functions: Vec<ImportedFunction>,
 }
 
@@ -329,6 +332,17 @@ fn mk_instance_internal(
         });
     }
 
+    // Materialize passive data segments so runtime memory.init/data.drop can use them.
+    let mut data_segments = Vec::with_capacity(module.data.len());
+    for data_segment in &module.data {
+        match data_segment {
+            Data::Passive { data } => {
+                data_segments.push(Some(module.module_data[data.0..data.1].to_vec()));
+            }
+            Data::Active { .. } | Data::ActiveMemIdx { .. } => data_segments.push(None),
+        }
+    }
+
     // Materialize element segments so runtime table.init/elem.drop can use passive segments.
     let mut materialized_element_segments = Vec::with_capacity(module.element_segments.len());
     let mut element_segments = Vec::with_capacity(module.element_segments.len());
@@ -437,6 +451,7 @@ fn mk_instance_internal(
                         &programs,
                         &tables,
                         &element_segments,
+                        &data_segments,
                     );
                     return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                 }
@@ -457,6 +472,7 @@ fn mk_instance_internal(
                         &programs,
                         &tables,
                         &element_segments,
+                        &data_segments,
                     );
                     return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                 }
@@ -526,6 +542,7 @@ fn mk_instance_internal(
                             &programs,
                             &tables,
                             &element_segments,
+                            &data_segments,
                         );
                         return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                     };
@@ -538,6 +555,7 @@ fn mk_instance_internal(
                             &programs,
                             &tables,
                             &element_segments,
+                            &data_segments,
                         );
                         return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                     }
@@ -591,6 +609,7 @@ fn mk_instance_internal(
                             &programs,
                             &tables,
                             &element_segments,
+                            &data_segments,
                         );
                         return Err(LinkError::MissingMemory);
                     }
@@ -603,6 +622,7 @@ fn mk_instance_internal(
                             &programs,
                             &tables,
                             &element_segments,
+                            &data_segments,
                         );
                         return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                     };
@@ -615,30 +635,14 @@ fn mk_instance_internal(
                             &programs,
                             &tables,
                             &element_segments,
+                            &data_segments,
                         );
                         return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                     }
                     memories[memory_idx].data_mut()[data_offset..data_end]
                         .copy_from_slice(&module.module_data[data.0..data.1]);
                 }
-                Data::Passive { data } => {
-                    let offset = data.0;
-                    let end = data.1;
-                    if end > memories[0].size() {
-                        register_detached_snapshot(
-                            owner_id,
-                            &module,
-                            &memories,
-                            &globals,
-                            &programs,
-                            &tables,
-                            &element_segments,
-                        );
-                        return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
-                    }
-                    memories[0].data_mut()[offset..end]
-                        .copy_from_slice(&module.module_data[offset..end]);
-                }
+                Data::Passive { .. } => {}
             }
         }
     }
@@ -651,6 +655,7 @@ fn mk_instance_internal(
         programs,
         tables,
         element_segments,
+        data_segments,
         imported_functions,
     };
 

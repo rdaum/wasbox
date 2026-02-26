@@ -123,6 +123,10 @@ pub enum Op {
     // Memory
     MemorySize(u32),
     MemoryGrow(u32),
+    MemoryInit(u32, u32), // (data_idx, memory_idx)
+    DataDrop(u32),        // data_idx
+    MemoryCopy(u32, u32), // (dst_memory_idx, src_memory_idx)
+    MemoryFill(u32),      // memory_idx
 
     // The remainder are all operations which operate purely off the stack and are 1:1 with their
     // raw opcode counterparts.

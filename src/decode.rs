@@ -910,6 +910,24 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                     5 => prg.push(Op::I64TruncSatF32U),
                     6 => prg.push(Op::I64TruncSatF64S),
                     7 => prg.push(Op::I64TruncSatF64U),
+                    8 => {
+                        let data_idx = reader.load_imm_varuint32()?;
+                        let memory_idx = reader.load_imm_varuint32()?;
+                        prg.push(Op::MemoryInit(data_idx, memory_idx));
+                    }
+                    9 => {
+                        let data_idx = reader.load_imm_varuint32()?;
+                        prg.push(Op::DataDrop(data_idx));
+                    }
+                    10 => {
+                        let dst_memory_idx = reader.load_imm_varuint32()?;
+                        let src_memory_idx = reader.load_imm_varuint32()?;
+                        prg.push(Op::MemoryCopy(dst_memory_idx, src_memory_idx));
+                    }
+                    11 => {
+                        let memory_idx = reader.load_imm_varuint32()?;
+                        prg.push(Op::MemoryFill(memory_idx));
+                    }
                     12 => {
                         let elem_idx = reader.load_imm_varuint32()?;
                         let table_idx = reader.load_imm_varuint32()?;
@@ -1115,6 +1133,20 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
                 match sub_opcode {
                     0..=7 => {
                         // trunc_sat operations - just consume the sub-opcode
+                    }
+                    8 => {
+                        reader.load_imm_varuint32()?; // dataidx
+                        reader.load_imm_varuint32()?; // memidx
+                    }
+                    9 => {
+                        reader.load_imm_varuint32()?; // dataidx
+                    }
+                    10 => {
+                        reader.load_imm_varuint32()?; // dst memidx
+                        reader.load_imm_varuint32()?; // src memidx
+                    }
+                    11 => {
+                        reader.load_imm_varuint32()?; // memidx
                     }
                     12 => {
                         reader.load_imm_varuint32()?; // elemidx

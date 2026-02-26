@@ -439,6 +439,7 @@ fn execute(
     globals: &mut [GlobalVar],
     tables: &mut [TableInstance],
     element_segments: &mut [Option<Vec<Value>>],
+    data_segments: &mut [Option<Vec<u8>>],
     max_ticks: usize,
     types: &[FuncType],
     functions: &[usize],
@@ -1039,6 +1040,77 @@ fn execute(
                         Err(_) => frame.stack.push_i32(-1),
                     }
                 }
+            }
+            Op::MemoryInit(data_idx, mem_idx) => {
+                let len = frame.stack.pop_u32()?;
+                let src = frame.stack.pop_u32()?;
+                let dst = frame.stack.pop_u32()?;
+
+                let memory = memories
+                    .get_mut(mem_idx as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
+                let data_segment = data_segments
+                    .get(data_idx as usize)
+                    .ok_or(Fault::GlobalIndexOutOfBounds)?;
+                let data_bytes = data_segment.as_deref().unwrap_or(&[]);
+
+                let (src_start, src_end) = validate_range(src, len, data_bytes.len())?;
+                let (dst_start, dst_end) = validate_range(dst, len, memory.size())?;
+                memory.data_mut()[dst_start..dst_end].copy_from_slice(&data_bytes[src_start..src_end]);
+            }
+            Op::DataDrop(data_idx) => {
+                let data_segment = data_segments
+                    .get_mut(data_idx as usize)
+                    .ok_or(Fault::GlobalIndexOutOfBounds)?;
+                *data_segment = None;
+            }
+            Op::MemoryCopy(dst_mem_idx, src_mem_idx) => {
+                let len = frame.stack.pop_u32()?;
+                let src = frame.stack.pop_u32()?;
+                let dst = frame.stack.pop_u32()?;
+
+                let dst_mem_idx = dst_mem_idx as usize;
+                let src_mem_idx = src_mem_idx as usize;
+                if dst_mem_idx >= memories.len() || src_mem_idx >= memories.len() {
+                    return Err(Fault::MemoryOutOfBounds);
+                }
+
+                if dst_mem_idx == src_mem_idx {
+                    let memory = memories
+                        .get_mut(dst_mem_idx)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let memory_size = memory.size();
+                    let (src_start, src_end) = validate_range(src, len, memory_size)?;
+                    let (dst_start, _) = validate_range(dst, len, memory_size)?;
+                    memory.data_mut().copy_within(src_start..src_end, dst_start);
+                } else if dst_mem_idx < src_mem_idx {
+                    let (left, right) = memories.split_at_mut(src_mem_idx);
+                    let dst_memory = &mut left[dst_mem_idx];
+                    let src_memory = &mut right[0];
+                    let (src_start, src_end) = validate_range(src, len, src_memory.size())?;
+                    let (dst_start, dst_end) = validate_range(dst, len, dst_memory.size())?;
+                    let src_bytes = src_memory.data()[src_start..src_end].to_vec();
+                    dst_memory.data_mut()[dst_start..dst_end].copy_from_slice(&src_bytes);
+                } else {
+                    let (left, right) = memories.split_at_mut(dst_mem_idx);
+                    let src_memory = &mut left[src_mem_idx];
+                    let dst_memory = &mut right[0];
+                    let (src_start, src_end) = validate_range(src, len, src_memory.size())?;
+                    let (dst_start, dst_end) = validate_range(dst, len, dst_memory.size())?;
+                    let src_bytes = src_memory.data()[src_start..src_end].to_vec();
+                    dst_memory.data_mut()[dst_start..dst_end].copy_from_slice(&src_bytes);
+                }
+            }
+            Op::MemoryFill(mem_idx) => {
+                let len = frame.stack.pop_u32()?;
+                let value = frame.stack.pop_i32()? as u8;
+                let dst = frame.stack.pop_u32()?;
+
+                let memory = memories
+                    .get_mut(mem_idx as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
+                let (dst_start, dst_end) = validate_range(dst, len, memory.size())?;
+                memory.data_mut()[dst_start..dst_end].fill(value);
             }
             Op::I32Eqz => {
                 let value = frame.stack.pop_i32()?;
@@ -2045,12 +2117,14 @@ pub(crate) fn eval_init_expr(
     // value.
     let mut const_prg_tables = vec![];
     let mut const_prg_element_segments = vec![];
+    let mut const_prg_data_segments = vec![];
     let result = execute(
         &mut global_exec_frame,
         &mut const_prg_memories,
         &mut const_prg_globals,
         &mut const_prg_tables,
         &mut const_prg_element_segments,
+        &mut const_prg_data_segments,
         EXPR_TICK_LIMIT,
         types,
         functions,
@@ -2111,11 +2185,12 @@ fn execute_module_frame(
     max_ticks: usize,
 ) -> Result<(Continuation, usize), Fault> {
     let function_type_mapping = build_function_type_mapping(instance);
-    let (memories, globals, tables, element_segments, module) = (
+    let (memories, globals, tables, element_segments, data_segments, module) = (
         &mut instance.memories,
         &mut instance.globals,
         &mut instance.tables,
         &mut instance.element_segments,
+        &mut instance.data_segments,
         &instance.module,
     );
     let mut memory_refs: Vec<&mut dyn Memory> =
@@ -2132,6 +2207,7 @@ fn execute_module_frame(
             globals,
             tables,
             element_segments,
+            data_segments,
             max_ticks,
             &module.types,
             &function_type_mapping,
@@ -2144,6 +2220,7 @@ fn execute_module_frame(
             globals,
             tables,
             element_segments,
+            data_segments,
             max_ticks,
             &module.types,
             &function_type_mapping,
