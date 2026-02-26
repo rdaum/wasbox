@@ -852,6 +852,7 @@ mod tests {
     wast_test!(address1_test, "address1.wast");
     wast_test!(align_test, "align.wast");
     wast_test!(align0_test, "align0.wast");
+    wast_test!(annotations_test, "annotations.wast");
     wast_test!(binary_test, "binary.wast");
     wast_test!(binary0_test, "binary0.wast");
     wast_test!(binary_leb128_test, "binary-leb128.wast");
@@ -859,6 +860,7 @@ mod tests {
     wast_test!(br_test, "br.wast");
     wast_test!(br_if_test, "br_if.wast");
     wast_test!(br_table_test, "br_table.wast");
+    wast_test!(bulk_test, "bulk.wast");
     wast_test!(call_test, "call.wast");
     wast_test!(const_test, "const.wast");
     wast_test!(data_test, "data.wast");
@@ -871,10 +873,18 @@ mod tests {
     wast_test!(f64_test, "f64.wast");
     wast_test!(f64_bitwise_test, "f64_bitwise.wast");
     wast_test!(f64_cmp_test, "f64_cmp.wast");
+    wast_test!(fac_test, "fac.wast");
+    wast_test!(float_memory_test, "float_memory.wast");
+    wast_test!(float_memory0_test, "float_memory0.wast");
+    wast_test!(float_misc_test, "float_misc.wast");
+    wast_test!(forward_test, "forward.wast");
+    wast_test!(func_ptrs_test, "func_ptrs.wast");
     wast_test!(global_test, "global.wast");
     wast_test!(i32_test, "i32.wast");
     wast_test!(i64_test, "i64.wast");
     wast_test!(if_test, "if.wast");
+    wast_test!(id_test, "id.wast");
+    wast_test!(inline_module_test, "inline-module.wast");
     wast_test!(local_get_test, "local_get.wast");
     wast_test!(local_init_test, "local_init.wast");
     wast_test!(local_set_test, "local_set.wast");
@@ -882,6 +892,7 @@ mod tests {
     wast_test!(ref_func_test, "ref_func.wast");
     wast_test!(ref_is_null_test, "ref_is_null.wast");
     wast_test!(ref_null_test, "ref_null.wast");
+    wast_test!(ref_test, "ref.wast");
     wast_test!(nop_test, "nop.wast");
     wast_test!(return_test, "return.wast");
     wast_test!(select_test, "select.wast");
@@ -921,6 +932,7 @@ mod tests {
     wast_test!(memory_init_test, "memory_init.wast");
     wast_test!(memory_init0_test, "memory_init0.wast");
     wast_test!(memory_redundancy_test, "memory_redundancy.wast");
+    wast_test!(memory_multi_test, "memory-multi.wast");
     wast_test!(elem_test, "elem.wast");
     wast_test!(table_test, "table.wast");
     wast_test!(exports_test, "exports.wast");
@@ -955,7 +967,15 @@ mod tests {
     wast_test!(table_grow_test, "table_grow.wast");
     wast_test!(table_fill_test, "table_fill.wast");
     wast_test!(table_copy_test, "table_copy.wast");
+    wast_test!(table_copy_mixed_test, "table_copy_mixed.wast");
     wast_test!(table_init_test, "table_init.wast");
+    wast_test!(switch_test, "switch.wast");
+    wast_test!(token_test, "token.wast");
+    wast_test!(skip_stack_guard_page_test, "skip-stack-guard-page.wast");
+    wast_test!(utf8_custom_section_id_test, "utf8-custom-section-id.wast");
+    wast_test!(utf8_import_field_test, "utf8-import-field.wast");
+    wast_test!(utf8_import_module_test, "utf8-import-module.wast");
+    wast_test!(utf8_invalid_encoding_test, "utf8-invalid-encoding.wast");
 
     #[test]
     fn test_minimal_import() {

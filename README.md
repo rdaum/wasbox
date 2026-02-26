@@ -13,8 +13,9 @@ It is not trying to be a high-performance JIT or a WASI runtime.
 - Core numeric execution: `i32`, `i64`, `f32`, `f64` arithmetic and comparisons.
 - Control flow: `block`, `loop`, `if/else`, `br`, `br_if`, `br_table`, `return`, traps.
 - Variables and functions: locals/globals, direct calls, `call_indirect` with signature checks.
-- Memory: linear memory load/store, memory size/grow.
+- Memory: linear memory load/store, memory size/grow, and multi-memory indexing for 32-bit memories.
 - Tables and references: `funcref`/`externref`, `table.get`, `table.set`, `ref.null`, `ref.func`, `ref.is_null`, `ref.eq`, `ref.as_non_null`.
+- Bulk memory/table ops: `memory.init`, `data.drop`, `memory.copy`, `memory.fill`, `table.init`, `elem.drop`, `table.copy`, `table.grow`, `table.size`, `table.fill`.
 - Module linking model: imports/exports, start function execution, multi-module execution state.
 - Incremental execution API: `ExecutionState::run_for_ticks(ticks)` returns `Complete` or `Paused` and can be resumed.
 - Shared imported runtime state: imported memories and tables share backing storage across modules.
@@ -30,16 +31,25 @@ Important scope note:
 
 - The WAST harness currently runs a curated subset of the official suite.
 - Repository has `257` `.wast` files under `tests/testsuite`.
-- Harness currently wires `56` of those files as executable tests.
+- Harness currently wires `130` of those files as executable tests.
 
 ## Known Limitations
 
 - No WASI support.
 - Many proposals are not implemented: SIMD, threads, GC, exceptions, typed function references (`call_ref` family), and others.
-- Multi-memory execution is not supported.
-- Bulk memory support is partial: `table.init` currently traps and `elem.drop` is currently a no-op.
+- Memory64 is not supported.
 - Runtime state is not designed for cross-thread `Send` usage in its current form.
 - No stable serialization/deserialization API for execution state yet.
+
+## WAST Expansion Focus
+
+The current WAST expansion work is targeting:
+
+- Core MVP behavior and parser robustness.
+- Bulk memory/table semantics and edge cases.
+- Reference-types behavior that does not require typed function references (`call_ref`) or GC.
+
+WAST files tied to unsupported proposals (SIMD, GC, exceptions, typed-function-references/tail-call, memory64) are intentionally left out for now.
 
 ## License
 

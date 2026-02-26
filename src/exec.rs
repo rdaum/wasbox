@@ -324,17 +324,30 @@ fn execute_branch(frame: &mut Frame, depth: usize) -> Result<(), Fault> {
     let target_signature = frame.control_stack[target_idx].signature.clone();
     let target_stack_width = frame.control_stack[target_idx].stack_width;
 
-    // Pop the branch values from the stack (these will be provided to the target)
-    let branch_values = match &target_signature {
-        Type::ValueType(vt) => {
+    // Pop the branch values from the stack (these will be provided to the target label).
+    // For loop labels, branch arity is the loop parameter arity. For all other labels,
+    // branch arity is the block result arity.
+    let branch_values = match (&target_signature, target_scope_type) {
+        (Type::ValueType(vt), ScopeType::Loop) => {
+            // Value-typed loop blocks have no explicit params in MVP encoding.
+            let _ = vt;
+            vec![]
+        }
+        (Type::FunctionType(ft), ScopeType::Loop) => {
+            let mut branch_values = vec![Value::Unit; ft.params.len()];
+            for (i, vt) in ft.params.iter().enumerate().rev() {
+                branch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
+            }
+            branch_values
+        }
+        (Type::ValueType(vt), _) => {
             if *vt != ValueType::Unit && frame.stack.width() > 0 {
                 vec![Value::pop_from(*vt, &mut frame.stack)?]
             } else {
                 vec![]
             }
         }
-        Type::FunctionType(ft) => {
-            // Pre-allocate and assign by index to avoid double-reverse
+        (Type::FunctionType(ft), _) => {
             let mut branch_values = vec![Value::Unit; ft.results.len()];
             for (i, vt) in ft.results.iter().enumerate().rev() {
                 branch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
