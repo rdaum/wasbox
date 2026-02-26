@@ -29,6 +29,9 @@ pub struct Program {
     pub scope_end_jumps: Vec<usize>,
     pub local_types: Vec<ValueType>,
     pub return_types: Vec<ValueType>,
+    /// Off-line storage for large instruction payloads to keep `Op` small and `Copy`.
+    pub br_tables: Vec<(Vec<u32>, u32)>,
+    pub select_types: Vec<Vec<ValueType>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -168,6 +171,8 @@ impl Program {
             scope_end_jumps: vec![],
             local_types: vec![],
             return_types: vec![],
+            br_tables: vec![],
+            select_types: vec![],
         }
     }
 
@@ -295,8 +300,9 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
             OpCode::BrTable => {
                 let depth_table = reader.load_array_varu32()?;
                 let default = reader.load_imm_varuint32()?;
-                // Store the relative depths directly instead of converting to absolute labels
-                prg.push(Op::BrTable(depth_table, default));
+                let table_idx = prg.br_tables.len() as u32;
+                prg.br_tables.push((depth_table, default));
+                prg.push(Op::BrTable(table_idx));
             }
             OpCode::Return => {
                 prg.push(Op::Return);
@@ -857,7 +863,9 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                     let val_type = ValueType::read(&mut reader)?;
                     types.push(val_type);
                 }
-                prg.push(Op::SelectT(types));
+                let select_idx = prg.select_types.len() as u32;
+                prg.select_types.push(types);
+                prg.push(Op::SelectT(select_idx));
             }
             OpCode::RefNull => {
                 let val_type = read_heap_type_as_value(&mut reader)?;

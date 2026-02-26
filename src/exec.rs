@@ -34,7 +34,7 @@ const EXPR_TICK_LIMIT: usize = 1 << 10;
 /// Default tick limit for normal program execution.
 const EXEC_TICK_LIMIT: usize = 1 << 24;
 /// Upper bound for retained reusable frames to avoid unbounded memory growth.
-const FRAME_POOL_LIMIT: usize = 1024;
+const FRAME_POOL_LIMIT: usize = 16384;
 
 pub enum Continuation {
     Call(u32),
@@ -77,7 +77,7 @@ pub enum Fault {
     /// Ran out of execution ticks
     OutOfTicks,
     /// Result of an expression etc was an unexpected continuation
-    UnexpectedResult(Continuation),
+    UnexpectedResult(Box<Continuation>),
     /// Value stack underflow
     StackUnderflow,
     /// Control stack underflow
@@ -305,36 +305,37 @@ fn execute_branch(frame: &mut Frame, types: &[FuncType], depth: usize) -> Result
     let target_stack_width = frame.control_stack[target_idx].stack_width;
     let target_start_pc = frame.control_stack[target_idx].start_pc;
     let target_end_pc = frame.control_stack[target_idx].end_pc;
+    let target_signature = frame.control_stack[target_idx].signature;
 
     // Pop the branch values from the stack (these will be provided to the target label).
     // For loop labels, branch arity is the loop parameter arity. For all other labels,
     // branch arity is the block result arity.
-    frame.scratch_values.clear();
-    match (&frame.control_stack[target_idx].signature, target_scope_type) {
+    frame.scratch_values_raw.clear();
+    match (&target_signature, target_scope_type) {
         (TypeSignature::ValueType(_), ScopeType::Loop) => {
             // Value-typed loop blocks have no explicit params in MVP encoding.
         }
         (TypeSignature::Index(idx), ScopeType::Loop) => {
             debug_assert!((*idx as usize) < types.len());
             let ft = unsafe { types.get_unchecked(*idx as usize) };
-            frame.scratch_values.resize(ft.params.len(), Value::Unit);
+            frame.scratch_values_raw.resize(ft.params.len(), 0);
             for (i, vt) in ft.params.iter().enumerate().rev() {
-                frame.scratch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
+                frame.scratch_values_raw[i] = Value::pop_raw_from(*vt, &mut frame.stack)?;
             }
         }
         (TypeSignature::ValueType(vt), _) => {
             if *vt != ValueType::Unit && frame.stack.width() > 0 {
                 frame
-                    .scratch_values
-                    .push(Value::pop_from(*vt, &mut frame.stack)?);
+                    .scratch_values_raw
+                    .push(Value::pop_raw_from(*vt, &mut frame.stack)?);
             }
         }
         (TypeSignature::Index(idx), _) => {
             debug_assert!((*idx as usize) < types.len());
             let ft = unsafe { types.get_unchecked(*idx as usize) };
-            frame.scratch_values.resize(ft.results.len(), Value::Unit);
+            frame.scratch_values_raw.resize(ft.results.len(), 0);
             for (i, vt) in ft.results.iter().enumerate().rev() {
-                frame.scratch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
+                frame.scratch_values_raw[i] = Value::pop_raw_from(*vt, &mut frame.stack)?;
             }
         }
     }
@@ -352,8 +353,24 @@ fn execute_branch(frame: &mut Frame, types: &[FuncType], depth: usize) -> Result
     frame.stack.shrink_to(target_stack_width);
 
     // Now provide the branch values to the target block
-    for value in &frame.scratch_values {
-        value.push_to(&mut frame.stack);
+    match (&target_signature, target_scope_type) {
+        (TypeSignature::ValueType(vt), _) => {
+            if vt != &ValueType::Unit && !frame.scratch_values_raw.is_empty() {
+                Value::push_raw_to(*vt, frame.scratch_values_raw[0], &mut frame.stack);
+            }
+        }
+        (TypeSignature::Index(idx), ScopeType::Loop) => {
+            let ft = &types[*idx as usize];
+            for (i, vt) in ft.params.iter().enumerate() {
+                Value::push_raw_to(*vt, frame.scratch_values_raw[i], &mut frame.stack);
+            }
+        }
+        (TypeSignature::Index(idx), _) => {
+            let ft = &types[*idx as usize];
+            for (i, vt) in ft.results.iter().enumerate() {
+                Value::push_raw_to(*vt, frame.scratch_values_raw[i], &mut frame.stack);
+            }
+        }
     }
 
     // For structured control flow, we need to find where to jump based on scope type
@@ -461,8 +478,18 @@ fn execute<const TRACK_TICKS: bool>(
 
                 // Shrink-stack to the width declared in the control scope.
                 frame.stack.shrink_to(end_scope.stack_width);
-                for value in &frame.scratch_values {
-                    value.push_to(&mut frame.stack);
+                match &end_scope.signature {
+                    TypeSignature::ValueType(vt) => {
+                        if vt != &ValueType::Unit && !frame.scratch_values_raw.is_empty() {
+                            Value::push_raw_to(*vt, frame.scratch_values_raw[0], &mut frame.stack);
+                        }
+                    }
+                    TypeSignature::Index(idx) => {
+                        let ft = &types[*idx as usize];
+                        for (i, vt) in ft.results.iter().enumerate() {
+                            Value::push_raw_to(*vt, frame.scratch_values_raw[i], &mut frame.stack);
+                        }
+                    }
                 }
                 continue;
             }
@@ -501,9 +528,10 @@ fn execute<const TRACK_TICKS: bool>(
                 if *local_idx as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let Value::I64(v) = frame.locals[*local_idx as usize] else {
+                if frame.program.local_types[*local_idx as usize] != ValueType::I64 {
                     return Err(Fault::Unreachable);
-                };
+                }
+                let v = frame.locals[*local_idx as usize];
                 if v == 0 {
                     execute_branch(frame, types, *depth as usize)?;
                 }
@@ -513,18 +541,20 @@ fn execute<const TRACK_TICKS: bool>(
                 if *lhs_local as usize >= frame.locals.len() || *rhs_local as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let Value::I32(lhs) = frame.locals[*lhs_local as usize] else {
+                if frame.program.local_types[*lhs_local as usize] != ValueType::I32
+                    || frame.program.local_types[*rhs_local as usize] != ValueType::I32
+                {
                     return Err(Fault::Unreachable);
-                };
-                let Value::I32(rhs) = frame.locals[*rhs_local as usize] else {
-                    return Err(Fault::Unreachable);
-                };
-                if (lhs as u32) >= (rhs as u32) {
+                }
+                let lhs = frame.locals[*lhs_local as usize] as u32;
+                let rhs = frame.locals[*rhs_local as usize] as u32;
+                if lhs >= rhs {
                     execute_branch(frame, types, *depth as usize)?;
                 }
                 continue;
             }
-            Op::BrTable(table, default) => {
+            Op::BrTable(idx) => {
+                let (table, default) = &frame.program.br_tables[*idx as usize];
                 let index = frame.stack.pop_u32()? as usize;
                 let depth = if index < table.len() {
                     table[index]
@@ -598,34 +628,37 @@ fn execute<const TRACK_TICKS: bool>(
                 if *idx as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                frame.locals[*idx as usize].push_to(&mut frame.stack);
+                let val = frame.locals[*idx as usize];
+                let ty = frame.program.local_types[*idx as usize];
+                Value::push_raw_to(ty, val, &mut frame.stack);
                 continue;
             }
             Op::SetLocal(idx) => {
                 if *idx as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let type_of_local = frame.program.local_types[*idx as usize];
-                let value = Value::pop_from(type_of_local, &mut frame.stack)?;
-                frame.locals[*idx as usize] = value;
+                let ty = frame.program.local_types[*idx as usize];
+                let val = Value::pop_raw_from(ty, &mut frame.stack)?;
+                frame.locals[*idx as usize] = val;
                 continue;
             }
             Op::TeeLocal(idx) => {
                 if *idx as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let type_of_local = frame.program.local_types[*idx as usize];
-                let value = Value::top_of(type_of_local, &mut frame.stack)?;
-                frame.locals[*idx as usize] = value;
+                let ty = frame.program.local_types[*idx as usize];
+                let val = Value::top_raw_of(ty, &mut frame.stack)?;
+                frame.locals[*idx as usize] = val;
                 continue;
             }
             Op::I32LocalMulAddConst(src, mul, add) => {
                 if *src as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let Value::I32(v) = frame.locals[*src as usize] else {
+                if frame.program.local_types[*src as usize] != ValueType::I32 {
                     return Err(Fault::Unreachable);
-                };
+                }
+                let v = frame.locals[*src as usize] as i32;
                 frame
                     .stack
                     .push_i32(v.wrapping_mul(*mul).wrapping_add(*add));
@@ -635,20 +668,26 @@ fn execute<const TRACK_TICKS: bool>(
                 if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let Value::I32(v) = frame.locals[*src as usize] else {
+                if frame.program.local_types[*src as usize] != ValueType::I32
+                    || frame.program.local_types[*dst as usize] != ValueType::I32
+                {
                     return Err(Fault::Unreachable);
-                };
-                frame.locals[*dst as usize] = Value::I32(v.wrapping_mul(*mul).wrapping_add(*add));
+                }
+                let v = frame.locals[*src as usize] as i32;
+                frame.locals[*dst as usize] = v.wrapping_mul(*mul).wrapping_add(*add) as i64 as u64;
                 continue;
             }
             Op::I32LocalAddConstSet(src, add, dst) => {
                 if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let Value::I32(v) = frame.locals[*src as usize] else {
+                if frame.program.local_types[*src as usize] != ValueType::I32
+                    || frame.program.local_types[*dst as usize] != ValueType::I32
+                {
                     return Err(Fault::Unreachable);
-                };
-                frame.locals[*dst as usize] = Value::I32(v.wrapping_add(*add));
+                }
+                let v = frame.locals[*src as usize] as i32;
+                frame.locals[*dst as usize] = v.wrapping_add(*add) as i64 as u64;
                 continue;
             }
             Op::I64LocalAddSet(a, b, dst) => {
@@ -658,23 +697,28 @@ fn execute<const TRACK_TICKS: bool>(
                 {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let Value::I64(av) = frame.locals[*a as usize] else {
+                if frame.program.local_types[*a as usize] != ValueType::I64
+                    || frame.program.local_types[*b as usize] != ValueType::I64
+                    || frame.program.local_types[*dst as usize] != ValueType::I64
+                {
                     return Err(Fault::Unreachable);
-                };
-                let Value::I64(bv) = frame.locals[*b as usize] else {
-                    return Err(Fault::Unreachable);
-                };
-                frame.locals[*dst as usize] = Value::I64(av.wrapping_add(bv));
+                }
+                let av = frame.locals[*a as usize];
+                let bv = frame.locals[*b as usize];
+                frame.locals[*dst as usize] = av.wrapping_add(bv);
                 continue;
             }
             Op::I64LocalSubConstSet(src, c, dst) => {
                 if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let Value::I64(v) = frame.locals[*src as usize] else {
+                if frame.program.local_types[*src as usize] != ValueType::I64
+                    || frame.program.local_types[*dst as usize] != ValueType::I64
+                {
                     return Err(Fault::Unreachable);
-                };
-                frame.locals[*dst as usize] = Value::I64(v.wrapping_sub(*c));
+                }
+                let v = frame.locals[*src as usize];
+                frame.locals[*dst as usize] = v.wrapping_sub(*c as u64);
                 continue;
             }
             Op::GetGlobal(g) => {
@@ -981,7 +1025,7 @@ fn execute<const TRACK_TICKS: bool>(
             | Op::BrIf(_)
             | Op::BrIfLocalI64Eqz(_, _)
             | Op::BrIfLocalI32GeU(_, _, _)
-            | Op::BrTable(_, _)
+            | Op::BrTable(_)
             | Op::Return
             | Op::Call(_)
             | Op::CallIndirect(_, _)
@@ -2307,9 +2351,9 @@ fn execute<const TRACK_TICKS: bool>(
                 let are_equal = if ref1 == ref2 { 1 } else { 0 };
                 frame.stack.push_i32(are_equal);
             }
-            Op::SelectT(ref _types) => {
+            Op::SelectT(_idx) => {
                 // For now, implement same as regular select
-                // TODO: Add type validation
+                // TODO: Add type validation using select_types[idx]
                 let condition = frame.stack.pop_i32()?;
                 let val2 = frame.stack.pop_u64()?;
                 let val1 = frame.stack.pop_u64()?;
@@ -2347,13 +2391,11 @@ pub enum Value {
     I64(i64),
     F32(f32),
     F64(f64),
-    V128(u128),
+    V128(u64, u64),
     FuncRef(Option<FuncRef>),
     ExternRef(Option<u32>),
     Unit,
 }
-
-impl Eq for Value {}
 
 fn encode_func_ref(func_ref: FuncRef) -> u64 {
     ((func_ref.module_id as u64) << 32) | func_ref.func_idx as u64
@@ -2374,7 +2416,7 @@ impl Value {
             Value::I64(_) => ValueType::I64,
             Value::F32(_) => ValueType::F32,
             Value::F64(_) => ValueType::F64,
-            Value::V128(_) => ValueType::V128,
+            Value::V128(_, _) => ValueType::V128,
             Value::FuncRef(_) => ValueType::FuncRef,
             Value::ExternRef(_) => ValueType::ExternRef,
             Value::Unit => ValueType::Unit,
@@ -2384,17 +2426,15 @@ impl Value {
     #[inline(always)]
     pub fn pop_from(ty: ValueType, stack: &mut Stack) -> Result<Self, Fault> {
         Ok(match ty {
-            ValueType::Unit => {
-                stack.pop_u64()?;
-                Value::Unit
-            }
+            ValueType::Unit => Value::Unit,
             ValueType::I32 => Value::I32(stack.pop_i32()?),
             ValueType::I64 => Value::I64(stack.pop_i64()?),
             ValueType::F32 => Value::F32(stack.pop_f32()?),
             ValueType::F64 => Value::F64(stack.pop_f64()?),
             ValueType::V128 => {
-                let (l, r) = (stack.pop_u64()?, stack.pop_u64()?);
-                Value::V128((r as u128) << 64 | l as u128)
+                let l = stack.pop_u64()?;
+                let r = stack.pop_u64()?;
+                Value::V128(l, r)
             }
             ValueType::FuncRef => Value::FuncRef(stack.pop_ref()?.map(decode_func_ref)),
             ValueType::ExternRef => Value::ExternRef(stack.pop_ref()?.map(|v| v as u32)),
@@ -2404,17 +2444,15 @@ impl Value {
     #[inline(always)]
     pub fn top_of(ty: ValueType, stack: &mut Stack) -> Result<Self, Fault> {
         Ok(match ty {
-            ValueType::Unit => {
-                stack.pop_u64()?;
-                Value::Unit
-            }
+            ValueType::Unit => Value::Unit,
             ValueType::I32 => Value::I32(stack.top_i32()?),
             ValueType::I64 => Value::I64(stack.top_i64()?),
             ValueType::F32 => Value::F32(stack.top_f32()?),
             ValueType::F64 => Value::F64(stack.top_f64()?),
             ValueType::V128 => {
-                let (l, r) = (stack.top_u64()?, stack.top_u64()?);
-                Value::V128((r as u128) << 64 | l as u128)
+                let l = stack.top_u64()?;
+                let r = stack.top_u64()?;
+                Value::V128(l, r)
             }
             ValueType::FuncRef => {
                 let raw = stack.top_u64()?;
@@ -2442,15 +2480,72 @@ impl Value {
             Value::I64(v) => stack.push_i64(*v),
             Value::F32(v) => stack.push_f32(*v),
             Value::F64(v) => stack.push_f64(*v),
-            Value::V128(v) => {
-                stack.push_u64(*v as u64);
-                stack.push_u64((*v >> 64) as u64);
+            Value::V128(l, r) => {
+                stack.push_u64(*l);
+                stack.push_u64(*r);
             }
             Value::FuncRef(v) => stack.push_ref(v.map(encode_func_ref)),
             Value::ExternRef(v) => stack.push_ref(v.map(|v| v as u64)),
-            Value::Unit => {
-                stack.push_u64(0);
-            }
+            Value::Unit => {}
+        }
+    }
+
+    #[inline(always)]
+    pub fn push_raw_to(ty: ValueType, val: u64, stack: &mut Stack) {
+        match ty {
+            ValueType::V128 => unreachable!("V128 not supported in raw push yet"),
+            ValueType::Unit => {}
+            _ => stack.push_u64(val),
+        }
+    }
+
+    pub fn from_raw(ty: ValueType, val: u64) -> Self {
+        match ty {
+            ValueType::I32 => Value::I32(val as i32),
+            ValueType::I64 => Value::I64(val as i64),
+            ValueType::F32 => Value::F32(f32::from_bits(val as u32)),
+            ValueType::F64 => Value::F64(f64::from_bits(val)),
+            ValueType::V128 => unreachable!("V128 not supported in raw values"),
+            ValueType::FuncRef => Value::FuncRef(if val == u64::MAX { None } else { Some(decode_func_ref(val)) }),
+            ValueType::ExternRef => Value::ExternRef(if val == u64::MAX { None } else { Some(val as u32) }),
+            ValueType::Unit => Value::Unit,
+        }
+    }
+
+    pub fn to_raw(&self) -> u64 {
+        match self {
+            Value::I32(v) => *v as i64 as u64,
+            Value::I64(v) => *v as u64,
+            Value::F32(v) => v.to_bits() as u64,
+            Value::F64(v) => v.to_bits(),
+            Value::V128(_, _) => unreachable!("V128 not supported in raw values"),
+            Value::FuncRef(v) => match v {
+                Some(fr) => encode_func_ref(*fr),
+                None => u64::MAX,
+            },
+            Value::ExternRef(v) => match v {
+                Some(er) => *er as u64,
+                None => u64::MAX,
+            },
+            Value::Unit => 0,
+        }
+    }
+
+    #[inline(always)]
+    pub fn pop_raw_from(ty: ValueType, stack: &mut Stack) -> Result<u64, Fault> {
+        match ty {
+            ValueType::V128 => Err(Fault::Unreachable),
+            ValueType::Unit => Ok(0),
+            _ => stack.pop_u64(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn top_raw_of(ty: ValueType, stack: &mut Stack) -> Result<u64, Fault> {
+        match ty {
+            ValueType::V128 => Err(Fault::Unreachable),
+            ValueType::Unit => Ok(0),
+            _ => stack.top_u64(),
         }
     }
 
@@ -2492,12 +2587,12 @@ pub(crate) fn eval_init_expr(
     let mut const_program = decode(&expression).unwrap();
     const_program.return_types = vec![return_type];
     let mut global_exec_frame = Frame {
-        locals: vec![Value::Unit; 0],
+        locals: vec![0; 0],
         program: Rc::new(const_program),
         stack: Stack::new(),
         pc: 0,
-        control_stack: vec![],
-        scratch_values: vec![],
+        control_stack: Vec::with_capacity(8),
+        scratch_values_raw: Vec::with_capacity(8),
     };
     // This little fragment, it doesn't get much memory and doesn't get *any* globals.
     // TODO: I don't actually know what a reasonable amount of memory is, so we'll just default
@@ -2531,7 +2626,7 @@ pub(crate) fn eval_init_expr(
     // Must be `ProgramEnd`, or there's a bug, and that's UnexpectedResult
     match result {
         Continuation::ProgramEnd | Continuation::DoneReturn => {}
-        _ => return Err(Fault::UnexpectedResult(result)),
+        _ => return Err(Fault::UnexpectedResult(Box::new(result))),
     }
 
     Value::pop_from(return_type, &mut global_exec_frame.stack)
@@ -2823,8 +2918,8 @@ impl ExecutionState {
                     program: Rc::new(program),
                     stack: Stack::new(),
                     pc: 0,
-                    control_stack: vec![],
-                    scratch_values: vec![],
+                    control_stack: Vec::with_capacity(8),
+                    scratch_values_raw: Vec::with_capacity(8),
                 };
                 for arg in args {
                     arg.push_to(&mut frame.stack);
@@ -2916,27 +3011,31 @@ impl ExecutionState {
                         // Handle function return
                         let (_, mut completed_frame) = self.frame_stack.pop().unwrap();
                         let return_types = &completed_frame.program.return_types;
-                        completed_frame.scratch_values.clear();
+                        completed_frame.scratch_values_raw.clear();
 
                         if let Some((_, caller_frame)) = self.frame_stack.last_mut() {
                             match return_types.as_slice() {
                                 [] => {}
                                 [rt] => {
-                                    let value = Value::pop_from(*rt, &mut completed_frame.stack)
+                                    let val = Value::pop_raw_from(*rt, &mut completed_frame.stack)
                                         .map_err(ExecError::ExecutionFault)?;
-                                    value.push_to(&mut caller_frame.stack);
+                                    Value::push_raw_to(*rt, val, &mut caller_frame.stack);
                                 }
                                 _ => {
                                     completed_frame
-                                        .scratch_values
-                                        .resize(return_types.len(), Value::Unit);
+                                        .scratch_values_raw
+                                        .resize(return_types.len(), 0);
                                     for (i, rt) in return_types.iter().enumerate().rev() {
-                                        completed_frame.scratch_values[i] =
-                                            Value::pop_from(*rt, &mut completed_frame.stack)
+                                        completed_frame.scratch_values_raw[i] =
+                                            Value::pop_raw_from(*rt, &mut completed_frame.stack)
                                                 .map_err(ExecError::ExecutionFault)?;
                                     }
-                                    for value in &completed_frame.scratch_values {
-                                        value.push_to(&mut caller_frame.stack);
+                                    for (i, rt) in return_types.iter().enumerate() {
+                                        Value::push_raw_to(
+                                            *rt,
+                                            completed_frame.scratch_values_raw[i],
+                                            &mut caller_frame.stack,
+                                        );
                                     }
                                 }
                             }
@@ -2947,21 +3046,25 @@ impl ExecutionState {
                             match return_types.as_slice() {
                                 [] => {}
                                 [rt] => {
-                                    final_values.push(
-                                        Value::pop_from(*rt, &mut completed_frame.stack)
-                                            .map_err(ExecError::ExecutionFault)?,
-                                    );
+                                    let val = Value::pop_raw_from(*rt, &mut completed_frame.stack)
+                                        .map_err(ExecError::ExecutionFault)?;
+                                    final_values.push(Value::from_raw(*rt, val));
                                 }
                                 _ => {
                                     completed_frame
-                                        .scratch_values
-                                        .resize(return_types.len(), Value::Unit);
+                                        .scratch_values_raw
+                                        .resize(return_types.len(), 0);
                                     for (i, rt) in return_types.iter().enumerate().rev() {
-                                        completed_frame.scratch_values[i] =
-                                            Value::pop_from(*rt, &mut completed_frame.stack)
+                                        completed_frame.scratch_values_raw[i] =
+                                            Value::pop_raw_from(*rt, &mut completed_frame.stack)
                                                 .map_err(ExecError::ExecutionFault)?;
                                     }
-                                    final_values.extend_from_slice(&completed_frame.scratch_values);
+                                    for (i, rt) in return_types.iter().enumerate() {
+                                        final_values.push(Value::from_raw(
+                                            *rt,
+                                            completed_frame.scratch_values_raw[i],
+                                        ));
+                                    }
                                 }
                             }
                             self.recycle_frame(completed_frame);
@@ -2972,7 +3075,11 @@ impl ExecutionState {
                     }
                     Continuation::Call(funcidx) => {
                         // Function call - check if it's imported or local
-                        let module = self.modules.get(&current_module_id).unwrap();
+                        let module_ptr = {
+                            let module = self.modules.get(&current_module_id).unwrap();
+                            module as *const Instance
+                        };
+                        let module = unsafe { &*module_ptr };
 
                         if module.num_imported_functions == 0 {
                             // Common hot path: module has no imports, so all calls are local.
@@ -2982,7 +3089,7 @@ impl ExecutionState {
                             let recycled_frame =
                                 self.pop_recycled_frame_for_program_ptr(target_program_ptr);
                             let (_, current_frame) = self.frame_stack.last_mut().unwrap();
-                            let module = self.modules.get(&current_module_id).unwrap();
+                            let module = unsafe { &*module_ptr };
                             let frame = if let Some(mut frame) = recycled_frame {
                                 module
                                     .refill_frame_for_funcidx_from_stack(
@@ -3045,7 +3152,7 @@ impl ExecutionState {
                             let recycled_frame =
                                 self.pop_recycled_frame_for_program_ptr(target_program_ptr);
                             let (_, current_frame) = self.frame_stack.last_mut().unwrap();
-                            let module = self.modules.get(&current_module_id).unwrap();
+                            let module = unsafe { &*module_ptr };
                             // Create new frame for the called function
                             let frame = if let Some(mut frame) = recycled_frame {
                                 module

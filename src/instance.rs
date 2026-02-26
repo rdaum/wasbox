@@ -115,20 +115,7 @@ fn build_function_type_mapping(module: &Module) -> Vec<usize> {
     function_type_mapping
 }
 
-fn default_value_for_type(local_type: ValueType) -> Value {
-    match local_type {
-        ValueType::I32 => Value::I32(0),
-        ValueType::I64 => Value::I64(0),
-        ValueType::F32 => Value::F32(0.0),
-        ValueType::F64 => Value::F64(0.0),
-        ValueType::Unit => Value::Unit,
-        ValueType::V128 => Value::V128(0),
-        ValueType::FuncRef => Value::FuncRef(None),
-        ValueType::ExternRef => Value::ExternRef(None),
-    }
-}
-
-fn build_program_local_defaults(module: &Module, programs: &[Rc<Program>]) -> Vec<Vec<Value>> {
+fn build_program_local_defaults(module: &Module, programs: &[Rc<Program>]) -> Vec<Vec<u64>> {
     let mut defaults = Vec::with_capacity(programs.len());
     for (i, program) in programs.iter().enumerate() {
         let typeidx = module.functions[i];
@@ -136,7 +123,16 @@ fn build_program_local_defaults(module: &Module, programs: &[Rc<Program>]) -> Ve
         let mut function_defaults =
             Vec::with_capacity(program.local_types.len().saturating_sub(param_count));
         for local_type in &program.local_types[param_count..] {
-            function_defaults.push(default_value_for_type(*local_type));
+            let raw_default = match local_type {
+                ValueType::I32
+                | ValueType::I64
+                | ValueType::F32
+                | ValueType::F64
+                | ValueType::Unit => 0,
+                ValueType::FuncRef | ValueType::ExternRef => u64::MAX,
+                ValueType::V128 => 0,
+            };
+            function_defaults.push(raw_default);
         }
         defaults.push(function_defaults);
     }
@@ -159,15 +155,38 @@ fn build_function_scope_signatures(module: &Module) -> Vec<TypeSignature> {
         .collect()
 }
 
-#[inline(always)]
-fn pop_value_for_type(value_type: ValueType, stack: &mut Stack) -> Result<Value, Fault> {
-    Ok(match value_type {
-        ValueType::I32 => Value::I32(stack.pop_i32()?),
-        ValueType::I64 => Value::I64(stack.pop_i64()?),
-        ValueType::F32 => Value::F32(stack.pop_f32()?),
-        ValueType::F64 => Value::F64(stack.pop_f64()?),
-        _ => Value::pop_from(value_type, stack)?,
-    })
+fn ensure_no_v128(module: &Module) -> Result<(), LinkError> {
+    for (idx, ft) in module.types.iter().enumerate() {
+        if ft.params.contains(&ValueType::V128) || ft.results.contains(&ValueType::V128) {
+            return Err(LinkError::UnsupportedFeature(format!(
+                "v128 in function type {idx} is not supported"
+            )));
+        }
+    }
+    for (idx, code) in module.code.iter().enumerate() {
+        if code.locals.contains(&ValueType::V128) {
+            return Err(LinkError::UnsupportedFeature(format!(
+                "v128 local in function {idx} is not supported"
+            )));
+        }
+    }
+    for (idx, global) in module.globals.iter().enumerate() {
+        if global.ty == ValueType::V128 {
+            return Err(LinkError::UnsupportedFeature(format!(
+                "v128 global {idx} is not supported"
+            )));
+        }
+    }
+    for (module_name, field_name, import) in &module.imports {
+        if let crate::module::Import::Global(vt, _) = import {
+            if *vt == ValueType::V128 {
+                return Err(LinkError::UnsupportedFeature(format!(
+                    "v128 import {module_name}::{field_name} is not supported"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn count_function_imports(module: &Module) -> u32 {
@@ -188,7 +207,7 @@ pub struct Instance {
     pub programs: Vec<Rc<Program>>,
     pub function_param_types: Vec<Vec<ValueType>>,
     pub function_scope_signatures: Vec<TypeSignature>,
-    pub program_local_defaults: Vec<Vec<Value>>,
+    pub program_local_defaults: Vec<Vec<u64>>,
     pub num_imported_functions: u32,
     pub function_type_mapping: Vec<usize>,
     pub tables: Vec<TableInstance>,
@@ -273,6 +292,7 @@ fn mk_instance_internal(
     imported_tables: Vec<TableInstance>,
     imported_memories: Vec<VectorMemory>,
 ) -> Result<Instance, LinkError> {
+    ensure_no_v128(&module)?;
     let owner_id = alloc_instance_owner_id();
 
     // Check if this module has any imports
@@ -902,7 +922,9 @@ impl Instance {
         let program = &self.programs[index];
         let num_locals = program.local_types.len();
         let mut locals = Vec::with_capacity(num_locals);
-        locals.extend_from_slice(args);
+        for arg in args {
+            locals.push(arg.to_raw());
+        }
 
         locals.extend_from_slice(&self.program_local_defaults[index]);
 
@@ -911,8 +933,8 @@ impl Instance {
             program: Rc::clone(program),
             stack: Stack::new(),
             pc: 0,
-            control_stack: vec![],
-            scratch_values: vec![],
+            control_stack: Vec::with_capacity(8),
+            scratch_values_raw: Vec::with_capacity(8),
         };
 
         // Add function scope for proper control flow management
@@ -945,19 +967,19 @@ impl Instance {
         let param_types = &self.function_param_types[index];
         let param_count = param_types.len();
         let local_defaults = &self.program_local_defaults[index];
-        let mut locals = vec![Value::Unit; param_count + local_defaults.len()];
+        let mut locals = vec![0u64; param_count + local_defaults.len()];
         match param_count {
             0 => {}
             1 => {
-                locals[0] = pop_value_for_type(param_types[0], stack)?;
+                locals[0] = stack.pop_u64()?;
             }
             2 => {
-                locals[1] = pop_value_for_type(param_types[1], stack)?;
-                locals[0] = pop_value_for_type(param_types[0], stack)?;
+                locals[1] = stack.pop_u64()?;
+                locals[0] = stack.pop_u64()?;
             }
             _ => {
                 for i in (0..param_count).rev() {
-                    locals[i] = pop_value_for_type(param_types[i], stack)?;
+                    locals[i] = stack.pop_u64()?;
                 }
             }
         }
@@ -970,8 +992,8 @@ impl Instance {
             program: Rc::clone(program),
             stack: Stack::new(),
             pc: 0,
-            control_stack: vec![],
-            scratch_values: vec![],
+            control_stack: Vec::with_capacity(8),
+            scratch_values_raw: Vec::with_capacity(8),
         };
 
         frame.push_control(
@@ -1001,24 +1023,23 @@ impl Instance {
         }
 
         let program = &self.programs[index];
-        let param_types = &self.function_param_types[index];
-        let param_count = param_types.len();
+        let param_count = self.function_param_types[index].len();
         let local_defaults = &self.program_local_defaults[index];
         let total_locals = param_count + local_defaults.len();
 
-        frame.locals.resize(total_locals, Value::Unit);
+        frame.locals.resize(total_locals, 0);
         match param_count {
             0 => {}
             1 => {
-                frame.locals[0] = pop_value_for_type(param_types[0], stack)?;
+                frame.locals[0] = stack.pop_u64()?;
             }
             2 => {
-                frame.locals[1] = pop_value_for_type(param_types[1], stack)?;
-                frame.locals[0] = pop_value_for_type(param_types[0], stack)?;
+                frame.locals[1] = stack.pop_u64()?;
+                frame.locals[0] = stack.pop_u64()?;
             }
             _ => {
                 for i in (0..param_count).rev() {
-                    frame.locals[i] = pop_value_for_type(param_types[i], stack)?;
+                    frame.locals[i] = stack.pop_u64()?;
                 }
             }
         }
@@ -1032,7 +1053,7 @@ impl Instance {
         frame.stack.shrink_to(0);
         frame.pc = 0;
         frame.control_stack.clear();
-        frame.scratch_values.clear();
+        frame.scratch_values_raw.clear();
 
         frame.push_control(
             self.function_scope_signatures[index],
@@ -1093,9 +1114,9 @@ impl Instance {
         let local_defaults = &self.program_local_defaults[local_idx];
         let total_locals = param_count + local_defaults.len();
 
-        frame.locals.resize(total_locals, Value::Unit);
+        frame.locals.resize(total_locals, 0);
         for (i, arg) in args.iter().take(param_count).enumerate() {
-            frame.locals[i] = *arg;
+            frame.locals[i] = arg.to_raw();
         }
         if !local_defaults.is_empty() {
             frame.locals[param_count..].copy_from_slice(local_defaults);
@@ -1108,7 +1129,7 @@ impl Instance {
         frame.stack.shrink_to(0);
         frame.pc = 0;
         frame.control_stack.clear();
-        frame.scratch_values.clear();
+        frame.scratch_values_raw.clear();
 
         frame.push_control(
             self.function_scope_signatures[local_idx],

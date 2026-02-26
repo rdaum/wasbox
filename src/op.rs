@@ -24,7 +24,7 @@ pub struct MemArg {
 /// A semantically richer, decoded version of all the WASM opcodes.
 /// To avoid having varints and having to deal with block structuring issues.
 /// The program will take a sequence of raw OpCodes and turn them into this.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Copy)]
 pub enum Op {
     Nop,
     Unreachable,
@@ -42,7 +42,7 @@ pub enum Op {
     // Peephole-fused branch conditions for hot loop patterns.
     BrIfLocalI64Eqz(u32, u32),     // (local_idx, depth)
     BrIfLocalI32GeU(u32, u32, u32), // (lhs_local, rhs_local, depth)
-    BrTable(Vec<u32>, u32),
+    BrTable(u32), // Index into Program.br_tables
     Return,
 
     // Calls
@@ -297,5 +297,5 @@ pub enum Op {
     RefIsNull,
     RefAsNonNull,
     RefEq,
-    SelectT(Vec<crate::ValueType>),
+    SelectT(u32), // Index into Program.select_types
 }

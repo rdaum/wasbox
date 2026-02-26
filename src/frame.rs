@@ -18,12 +18,12 @@ use crate::{FuncType, TypeSignature, ValueType};
 use std::rc::Rc;
 
 pub struct Frame {
-    pub locals: Vec<Value>,
+    pub locals: Vec<u64>,
     pub program: Rc<Program>,
     pub stack: Stack,
     pub pc: usize,
     pub control_stack: Vec<Control>,
-    pub scratch_values: Vec<Value>,
+    pub scratch_values_raw: Vec<u64>,
 }
 
 pub struct Control {
@@ -37,12 +37,12 @@ pub struct Control {
 impl Frame {
     pub fn new(num_locals: usize, program: Rc<Program>) -> Self {
         Frame {
-            locals: vec![Value::Unit; num_locals],
+            locals: vec![0; num_locals],
             stack: Stack::new(),
             pc: 0,
             program,
-            control_stack: vec![],
-            scratch_values: vec![],
+            control_stack: Vec::with_capacity(8),
+            scratch_values_raw: Vec::with_capacity(8),
         }
     }
 
@@ -69,20 +69,20 @@ impl Frame {
             .ok_or(Fault::ControlStackUnderflow)?;
 
         // Pop the result values BEFORE shrinking the stack and stash in reusable scratch.
-        self.scratch_values.clear();
+        // We use raw u64 storage to avoid Value overhead.
+        self.scratch_values_raw.clear();
         match &c.signature {
             TypeSignature::ValueType(vt) => {
                 if *vt != ValueType::Unit {
-                    self.scratch_values
-                        .push(Value::pop_from(*vt, &mut self.stack)?);
+                    self.scratch_values_raw.push(Value::pop_raw_from(*vt, &mut self.stack)?);
                 }
             }
             TypeSignature::Index(idx) => {
                 debug_assert!((*idx as usize) < types.len());
                 let ft = unsafe { types.get_unchecked(*idx as usize) };
-                self.scratch_values.resize(ft.results.len(), Value::Unit);
+                self.scratch_values_raw.resize(ft.results.len(), 0);
                 for (i, vt) in ft.results.iter().enumerate().rev() {
-                    self.scratch_values[i] = Value::pop_from(*vt, &mut self.stack)?;
+                    self.scratch_values_raw[i] = Value::pop_raw_from(*vt, &mut self.stack)?;
                 }
             }
         }
@@ -94,7 +94,9 @@ impl Frame {
         if local_index as usize >= self.locals.len() {
             return Err(Fault::LocalIndexOutOfBounds);
         }
-        self.locals[local_index as usize].push_to(&mut self.stack);
+        let val = self.locals[local_index as usize];
+        let ty = self.program.local_types[local_index as usize];
+        Value::push_raw_to(ty, val, &mut self.stack);
         Ok(())
     }
 
@@ -102,15 +104,15 @@ impl Frame {
         if local_index as usize >= self.locals.len() {
             return Err(Fault::LocalIndexOutOfBounds);
         }
-        let type_of_local = self.program.local_types[local_index as usize];
+        let ty = self.program.local_types[local_index as usize];
 
-        let value = if pop {
-            Value::pop_from(type_of_local, &mut self.stack)?
+        let val = if pop {
+            Value::pop_raw_from(ty, &mut self.stack)?
         } else {
-            Value::top_of(type_of_local, &mut self.stack)?
+            Value::top_raw_of(ty, &mut self.stack)?
         };
 
-        self.locals[local_index as usize] = value;
+        self.locals[local_index as usize] = val;
         Ok(())
     }
 }

@@ -30,7 +30,9 @@ impl Default for Stack {
 impl Stack {
     #[inline(always)]
     pub fn new() -> Self {
-        Stack { data: vec![] }
+        Stack {
+            data: Vec::with_capacity(16),
+        }
     }
 
     #[inline(always)]
