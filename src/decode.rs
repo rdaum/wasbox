@@ -73,8 +73,32 @@ impl Error for DecodeError {}
 const MAX_MEMORY_OFFSET: u32 = 0xffff_ffff;
 
 fn read_memarg(reader: &mut LEB128Reader, max_align: u8) -> Result<MemArg, DecodeError> {
-    // align, offset in mem
-    let align = reader.load_imm_varuint32()?;
+    // Extended memarg flags used by the multi-memory proposal:
+    // bit 6 => explicit memory index follows.
+    // bit 7 => memory64 offset (unsupported here).
+    let flags = reader.load_imm_varuint32()?;
+    if (flags & !0x7f) != 0 {
+        return Err(DecodeError::MalformedMemory(format!(
+            "Malformed memop flags: {flags:#0x}"
+        )));
+    }
+    let memory = if (flags & (1 << 6)) != 0 {
+        reader.load_imm_varuint32()?
+    } else {
+        0
+    };
+    if (flags & (1 << 7)) != 0 {
+        return Err(DecodeError::MalformedMemory(format!(
+            "Malformed memop flags: {flags:#0x}"
+        )));
+    }
+    let align = flags & 0x3f;
+    if align > max_align as u32 {
+        return Err(DecodeError::MalformedMemory(format!(
+            "Invalid alignment: {align:#0x}"
+        )));
+    }
+
     // we load offset as a u64, but then check it's within the bounds of a u32, this seemed
     // to be the only way to not get a "0" back from the leb128 reader here, when the value was
     // over 0xffff_ffff (?!)
@@ -85,15 +109,12 @@ fn read_memarg(reader: &mut LEB128Reader, max_align: u8) -> Result<MemArg, Decod
             "Offset too large: {offset:#0x}"
         )));
     }
-    // check alignment
-    if align > (max_align as u32) {
-        return Err(DecodeError::MalformedMemory(format!(
-            "Invalid alignment: {align:#0x}"
-        )));
-    }
-
     let offset = offset as usize;
-    Ok(MemArg { align, offset })
+    Ok(MemArg {
+        align,
+        offset,
+        memory,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -392,26 +413,12 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 prg.push(Op::Store32_64(memarg));
             }
             OpCode::CurrentMemorySize => {
-                // Should be follow by a single u8, which is expected to be 0x00, or this is a
-                // malformed memory instruction.
-                let m_idx = reader.load_imm_u8()?;
-                if m_idx != 0x00 {
-                    return Err(DecodeError::FailedToDecode(format!(
-                        "Expected GrowMemory 0x00, got {m_idx:#0x}"
-                    )));
-                }
-                prg.push(Op::MemorySize);
+                let m_idx = reader.load_imm_varuint32()?;
+                prg.push(Op::MemorySize(m_idx));
             }
             OpCode::GrowMemory => {
-                // Should be follow by a single u8, which is expected to be 0x00, or this is a
-                // malformed memory instruction.
-                let m_idx = reader.load_imm_u8()?;
-                if m_idx != 0x00 {
-                    return Err(DecodeError::FailedToDecode(format!(
-                        "Expected GrowMemory 0x00, got {m_idx:#0x}"
-                    )));
-                }
-                prg.push(Op::MemoryGrow);
+                let m_idx = reader.load_imm_varuint32()?;
+                prg.push(Op::MemoryGrow(m_idx));
             }
             OpCode::I32Const => {
                 let value = reader.load_imm_signed_varint32()?;
@@ -987,14 +994,7 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
                 reader.load_imm_varuint32()?;
             }
             OpCode::CurrentMemorySize | OpCode::GrowMemory => {
-                // Should be followed by a single u8, which is expected to be 0x00, or this is a
-                // malformed memory instruction.
-                let m_idx = reader.load_imm_u8()?;
-                if m_idx != 0x00 {
-                    return Err(DecodeError::FailedToDecode(format!(
-                        "Expected GrowMemory 0x00, got {m_idx:#0x}"
-                    )));
-                }
+                reader.load_imm_varuint32()?;
             }
             OpCode::LoadI32
             | OpCode::LoadI64

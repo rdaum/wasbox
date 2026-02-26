@@ -403,37 +403,55 @@ mod tests {
         }
     }
 
-    fn convert_ret(v: &WastRet) -> wasbox::Value {
-        match v {
-            WastRet::Core(WastRetCore::I32(i)) => wasbox::Value::I32(*i),
-            WastRet::Core(WastRetCore::I64(i)) => wasbox::Value::I64(*i),
-            WastRet::Core(WastRetCore::F32(NanPattern::Value(f))) => {
-                wasbox::Value::F32(f32::from_bits(f.bits))
+    fn ret_core_matches(expected: &WastRetCore, actual: &wasbox::Value) -> bool {
+        match expected {
+            WastRetCore::I32(i) => matches!(actual, wasbox::Value::I32(v) if v == i),
+            WastRetCore::I64(i) => matches!(actual, wasbox::Value::I64(v) if v == i),
+            WastRetCore::F32(NanPattern::Value(f)) => {
+                matches!(actual, wasbox::Value::F32(v) if v.to_bits() == f.bits)
             }
-            WastRet::Core(WastRetCore::F32(NanPattern::ArithmeticNan)) => {
-                wasbox::Value::F32(f32::NAN)
+            WastRetCore::F32(NanPattern::ArithmeticNan)
+            | WastRetCore::F32(NanPattern::CanonicalNan) => {
+                matches!(actual, wasbox::Value::F32(v) if v.is_nan())
             }
-            WastRet::Core(WastRetCore::F32(NanPattern::CanonicalNan)) => {
-                wasbox::Value::F32(f32::NAN)
+            WastRetCore::F64(NanPattern::Value(f)) => {
+                matches!(actual, wasbox::Value::F64(v) if v.to_bits() == f.bits)
             }
-            WastRet::Core(WastRetCore::F64(NanPattern::Value(f))) => {
-                wasbox::Value::F64(f64::from_bits(f.bits))
+            WastRetCore::F64(NanPattern::ArithmeticNan)
+            | WastRetCore::F64(NanPattern::CanonicalNan) => {
+                matches!(actual, wasbox::Value::F64(v) if v.is_nan())
             }
-            WastRet::Core(WastRetCore::F64(NanPattern::ArithmeticNan)) => {
-                wasbox::Value::F64(f64::NAN)
+            WastRetCore::RefNull(None) => {
+                matches!(
+                    actual,
+                    wasbox::Value::FuncRef(None) | wasbox::Value::ExternRef(None)
+                )
             }
-            WastRet::Core(WastRetCore::F64(NanPattern::CanonicalNan)) => {
-                wasbox::Value::F64(f64::NAN)
-            }
-            WastRet::Core(WastRetCore::RefExtern(r)) => wasbox::Value::ExternRef(*r),
-            WastRet::Core(WastRetCore::RefNull(ref_type)) => {
-                // Determine type based on context
-                match format!("{ref_type:?}").as_str() {
-                    s if s.contains("Func") => wasbox::Value::FuncRef(None),
-                    _ => wasbox::Value::ExternRef(None),
-                }
-            }
-            _ => panic!("Unsupported ret type"),
+            WastRetCore::RefNull(Some(ref_type)) => match format!("{ref_type:?}").as_str() {
+                s if s.contains("Func") => matches!(actual, wasbox::Value::FuncRef(None)),
+                _ => matches!(actual, wasbox::Value::ExternRef(None)),
+            },
+            WastRetCore::RefExtern(r) => matches!(actual, wasbox::Value::ExternRef(v) if v == r),
+            WastRetCore::Either(cases) => cases.iter().any(|case| ret_core_matches(case, actual)),
+            WastRetCore::RefFunc(_) => matches!(actual, wasbox::Value::FuncRef(Some(_))),
+            WastRetCore::RefAny
+            | WastRetCore::RefEq
+            | WastRetCore::RefArray
+            | WastRetCore::RefStruct
+            | WastRetCore::RefI31
+            | WastRetCore::RefI31Shared
+            | WastRetCore::RefHost(_) => matches!(
+                actual,
+                wasbox::Value::FuncRef(Some(_)) | wasbox::Value::ExternRef(Some(_))
+            ),
+            _ => false,
+        }
+    }
+
+    fn ret_matches(expected: &WastRet, actual: &wasbox::Value) -> bool {
+        match expected {
+            WastRet::Core(core) => ret_core_matches(core, actual),
+            _ => false,
         }
     }
 
@@ -602,12 +620,9 @@ mod tests {
                         registry.refresh_from_execution(execution);
                         let result = execution.result().unwrap();
 
-                        let expected_results: Vec<_> = results.iter().map(convert_ret).collect();
-                        for (i, (expected, actual)) in
-                            expected_results.iter().zip(result.iter()).enumerate()
-                        {
+                        for (i, (expected, actual)) in results.iter().zip(result.iter()).enumerate() {
                             assert!(
-                                expected.eq_w_nan(actual),
+                                ret_matches(expected, actual),
                                 "Invoke: {name}: Mismatch at index {i}: expected {expected:?}, got {actual:?} for directive #{directive_num} @ {linecol:?}"
                             );
                         }
@@ -663,15 +678,14 @@ mod tests {
                             actual
                         };
 
-                        let expected_results: Vec<_> = results.iter().map(convert_ret).collect();
                         assert!(
-                            !expected_results.is_empty(),
+                            !results.is_empty(),
                             "Expected at least one result for get {global:?}"
                         );
                         assert!(
-                            expected_results[0].eq_w_nan(&actual),
+                            ret_matches(&results[0], &actual),
                             "Get: {global}: expected {:?}, got {:?} for directive #{directive_num} @ {linecol:?}",
-                            expected_results[0],
+                            results[0],
                             actual
                         );
                     }
@@ -829,8 +843,12 @@ mod tests {
 
     // WAST test suite tests
     wast_test!(address_test, "address.wast");
+    wast_test!(address0_test, "address0.wast");
+    wast_test!(address1_test, "address1.wast");
     wast_test!(align_test, "align.wast");
+    wast_test!(align0_test, "align0.wast");
     wast_test!(binary_test, "binary.wast");
+    wast_test!(binary0_test, "binary0.wast");
     wast_test!(binary_leb128_test, "binary-leb128.wast");
     wast_test!(block_test, "block.wast");
     wast_test!(br_test, "br.wast");
@@ -839,6 +857,8 @@ mod tests {
     wast_test!(call_test, "call.wast");
     wast_test!(const_test, "const.wast");
     wast_test!(data_test, "data.wast");
+    wast_test!(data0_test, "data0.wast");
+    wast_test!(data1_test, "data1.wast");
     wast_test!(f32_test, "f32.wast");
     wast_test!(f32_bitwise_test, "f32_bitwise.wast");
     wast_test!(f64_test, "f64.wast");
@@ -862,16 +882,28 @@ mod tests {
     wast_test!(traps_test, "traps.wast");
     wast_test!(store_test, "store.wast");
     wast_test!(load_test, "load.wast");
+    wast_test!(load0_test, "load0.wast");
+    wast_test!(load1_test, "load1.wast");
+    wast_test!(load2_test, "load2.wast");
     wast_test!(stack_test, "stack.wast");
     wast_test!(type_test, "type.wast");
     wast_test!(comments_test, "comments.wast");
     wast_test!(conversions_test, "conversions.wast");
     wast_test!(memory_test, "memory.wast");
     wast_test!(memory_size_test, "memory_size.wast");
+    wast_test!(memory_size0_test, "memory_size0.wast");
+    wast_test!(memory_size1_test, "memory_size1.wast");
+    wast_test!(memory_size2_test, "memory_size2.wast");
+    wast_test!(memory_size3_test, "memory_size3.wast");
+    wast_test!(memory_size_import_test, "memory_size_import.wast");
+    wast_test!(memory_trap_test, "memory_trap.wast");
+    wast_test!(memory_trap0_test, "memory_trap0.wast");
+    wast_test!(memory_trap1_test, "memory_trap1.wast");
     wast_test!(memory_grow_test, "memory_grow.wast");
     wast_test!(elem_test, "elem.wast");
     wast_test!(table_test, "table.wast");
     wast_test!(exports_test, "exports.wast");
+    wast_test!(exports0_test, "exports0.wast");
     wast_test!(imports_test, "imports.wast");
     wast_test!(start_test, "start.wast");
     wast_test!(func_test, "func.wast");
@@ -882,6 +914,8 @@ mod tests {
     wast_test!(float_literals_test, "float_literals.wast");
     wast_test!(int_exprs_test, "int_exprs.wast");
     wast_test!(float_exprs_test, "float_exprs.wast");
+    wast_test!(float_exprs0_test, "float_exprs0.wast");
+    wast_test!(float_exprs1_test, "float_exprs1.wast");
     wast_test!(labels_test, "labels.wast");
     wast_test!(left_to_right_test, "left-to-right.wast");
 

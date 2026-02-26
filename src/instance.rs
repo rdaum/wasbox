@@ -377,13 +377,6 @@ fn mk_instance_internal(
         }
     }
 
-    // Support modules without memory
-    if memories.len() > 1 {
-        return Err(LinkError::UnsupportedFeature(
-            "Multiple memories not supported yet".to_string(),
-        ));
-    }
-
     // Populate memory from global data.
     for data_segment in &module.data {
         match data_segment {

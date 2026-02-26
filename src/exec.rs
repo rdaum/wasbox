@@ -410,9 +410,9 @@ fn execute_branch(frame: &mut Frame, depth: usize) -> Result<(), Fault> {
     Ok(())
 }
 
-fn execute<M>(
+fn execute(
     frame: &mut Frame,
-    memory: &mut M,
+    memories: &mut [&mut dyn Memory],
     globals: &mut [GlobalVar],
     tables: &mut [TableInstance],
     max_ticks: usize,
@@ -420,8 +420,6 @@ fn execute<M>(
     functions: &[usize],
     current_module_id: u32,
 ) -> Result<(Continuation, usize), Fault>
-where
-    M: Memory,
 {
     let mut ticks_used = 0;
     loop {
@@ -677,124 +675,216 @@ where
                 // No-op until element segment stores are modeled explicitly.
             }
             Op::LoadI32(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_i32(addr)?;
                 frame.stack.push_i32(value);
             }
             Op::LoadI64(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_i64(addr)?;
                 frame.stack.push_i64(value);
             }
             Op::LoadF32(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_f32(addr)?;
                 frame.stack.push_f32(value);
             }
             Op::LoadF64(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_f64(addr)?;
                 frame.stack.push_f64(value);
             }
 
             // Extending load, signed
             Op::Load8SE(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_u8(addr)? as i8 as i32;
                 frame.stack.push_i32(value);
             }
             Op::Load16Se(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_u16(addr)? as i16 as i32;
                 frame.stack.push_i32(value);
             }
             Op::Load8I64Se(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_u8(addr)? as i8 as i64;
                 frame.stack.push_i64(value);
             }
             Op::Load16I64Se(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_u16(addr)? as i16 as i64;
                 frame.stack.push_i64(value);
             }
             Op::Load32I64Se(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_u32(addr)? as i32 as i64;
                 frame.stack.push_i64(value);
             }
 
             // Extending load, unsigned
             Op::Load8Ze(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_u8(addr)? as u32;
                 frame.stack.push_u32(value);
             }
             Op::Load16Ze(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_u16(addr)? as u32;
                 frame.stack.push_u32(value);
             }
             Op::Load8I64Ze(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_u8(addr)? as u64;
                 frame.stack.push_u64(value);
             }
             Op::Load16I64Ze(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_u16(addr)? as u64;
                 frame.stack.push_u64(value);
             }
             Op::Load32I64Ze(addr) => {
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let value = memory.get_u32(addr)? as u64;
                 frame.stack.push_u64(value);
             }
             Op::StoreI32(addr) => {
                 let value = frame.stack.pop_i32()?;
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 memory.set_i32(addr, value)?;
             }
             Op::StoreI64(addr) => {
                 let value = frame.stack.pop_i64()?;
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 memory.set_i64(addr, value)?;
             }
             Op::StoreF32(addr) => {
                 let value = frame.stack.pop_f32()?;
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 memory.set_f32(addr, value)?;
             }
             Op::StoreF64(addr) => {
                 let value = frame.stack.pop_f64()?;
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 memory.set_f64(addr, value)?;
             }
 
             // Silently narrow the width of the value
             Op::Store8_32(addr) => {
                 let value = frame.stack.pop_i32()? as u8;
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 memory.set_u8(addr, value)?;
             }
             Op::Store16_32(addr) => {
                 let value = frame.stack.pop_i32()? as u16;
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 memory.set_u16(addr, value)?;
             }
             Op::Store8_64(addr) => {
                 let value = frame.stack.pop_i64()? as u8;
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 memory.set_u8(addr, value)?;
             }
             Op::Store16_64(addr) => {
                 let value = frame.stack.pop_i64()? as u16;
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 memory.set_u16(addr, value)?;
             }
             Op::Store32_64(addr) => {
                 let value = frame.stack.pop_i64()? as u32;
-                let addr = adjust_memarg(&mut frame.stack, &addr)?;
+                let memarg = addr;
+                let addr = adjust_memarg(&mut frame.stack, &memarg)?;
+                let memory = memories
+                    .get_mut(memarg.memory as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 memory.set_u32(addr, value)?;
             }
 
@@ -810,19 +900,32 @@ where
             Op::F64Const(v) => {
                 frame.stack.push_u64(v.to_bits());
             }
-            Op::MemorySize => {
+            Op::MemorySize(mem_idx) => {
+                let memory = memories
+                    .get_mut(mem_idx as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 let size_in_bytes = memory.size();
                 let size_in_pages = size_in_bytes / WASM_PAGE_SIZE;
                 frame.stack.push_u32(size_in_pages as u32);
             }
-            Op::MemoryGrow => {
+            Op::MemoryGrow(mem_idx) => {
                 let delta = frame.stack.pop_i32()?;
+                let memory = memories
+                    .get_mut(mem_idx as usize)
+                    .ok_or(Fault::MemoryOutOfBounds)?;
                 if delta < 0 {
                     frame.stack.push_i32(-1);
                 } else {
                     let current_size = memory.size();
                     let old_page_count = current_size / WASM_PAGE_SIZE;
-                    let new_size = current_size + (delta as usize * WASM_PAGE_SIZE);
+                    let Some(growth_size) = (delta as usize).checked_mul(WASM_PAGE_SIZE) else {
+                        frame.stack.push_i32(-1);
+                        continue;
+                    };
+                    let Some(new_size) = current_size.checked_add(growth_size) else {
+                        frame.stack.push_i32(-1);
+                        continue;
+                    };
                     match memory.grow(new_size) {
                         Ok(_) => frame.stack.push_i32(old_page_count as i32),
                         Err(_) => frame.stack.push_i32(-1),
@@ -1825,6 +1928,7 @@ pub(crate) fn eval_init_expr(
     //   to one page.
     let mut const_prg_memory_vec = vec![0; WASM_PAGE_SIZE];
     let mut const_prg_memory = SliceMemory::new(&mut const_prg_memory_vec);
+    let mut const_prg_memories: [&mut dyn Memory; 1] = [&mut const_prg_memory];
 
     // Create a globals context that includes imported globals
     let mut const_prg_globals = imported_globals.to_vec();
@@ -1834,7 +1938,7 @@ pub(crate) fn eval_init_expr(
     let mut const_prg_tables = vec![];
     let result = execute(
         &mut global_exec_frame,
-        &mut const_prg_memory,
+        &mut const_prg_memories,
         &mut const_prg_globals,
         &mut const_prg_tables,
         EXPR_TICK_LIMIT,
@@ -1897,29 +2001,38 @@ fn execute_module_frame(
     max_ticks: usize,
 ) -> Result<(Continuation, usize), Fault> {
     let function_type_mapping = build_function_type_mapping(instance);
+    let (memories, globals, tables, module) = (
+        &mut instance.memories,
+        &mut instance.globals,
+        &mut instance.tables,
+        &instance.module,
+    );
+    let mut memory_refs: Vec<&mut dyn Memory> =
+        memories.iter_mut().map(|m| m as &mut dyn Memory).collect();
 
     // Memory instructions are validated at module level, but keep an empty fallback memory so
     // malformed modules trap cleanly instead of panicking.
-    if instance.memories.is_empty() {
-        let mut memory = crate::VectorMemory::new(0, None);
+    if memory_refs.is_empty() {
+        let mut fallback_memory = crate::VectorMemory::new(0, None);
+        let mut fallback_memories: [&mut dyn Memory; 1] = [&mut fallback_memory];
         execute(
             frame,
-            &mut memory,
-            &mut instance.globals,
-            &mut instance.tables,
+            &mut fallback_memories,
+            globals,
+            tables,
             max_ticks,
-            &instance.module.types,
+            &module.types,
             &function_type_mapping,
             module_id,
         )
     } else {
         execute(
             frame,
-            &mut instance.memories[0],
-            &mut instance.globals,
-            &mut instance.tables,
+            &mut memory_refs,
+            globals,
+            tables,
             max_ticks,
-            &instance.module.types,
+            &module.types,
             &function_type_mapping,
             module_id,
         )

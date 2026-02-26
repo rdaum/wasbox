@@ -18,6 +18,7 @@ use crate::TypeSignature;
 pub struct MemArg {
     pub offset: usize,
     pub align: u32,
+    pub memory: u32,
 }
 
 /// A semantically richer, decoded version of all the WASM opcodes.
@@ -116,8 +117,8 @@ pub enum Op {
     F64Const(f64),
 
     // Memory
-    MemorySize,
-    MemoryGrow,
+    MemorySize(u32),
+    MemoryGrow(u32),
 
     // The remainder are all operations which operate purely off the stack and are 1:1 with their
     // raw opcode counterparts.

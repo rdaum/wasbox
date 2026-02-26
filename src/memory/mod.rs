@@ -34,7 +34,10 @@ pub trait Memory {
         Ok(self.data()[offset])
     }
     fn get_u16(&self, offset: usize) -> Result<u16, Fault> {
-        if offset + 2 > self.size() {
+        let Some(end) = offset.checked_add(2) else {
+            return Err(Fault::MemoryOutOfBounds);
+        };
+        if end > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         Ok(u16::from_le_bytes([
@@ -43,7 +46,10 @@ pub trait Memory {
         ]))
     }
     fn get_i32(&self, offset: usize) -> Result<i32, Fault> {
-        if offset + 4 > self.size() {
+        let Some(end) = offset.checked_add(4) else {
+            return Err(Fault::MemoryOutOfBounds);
+        };
+        if end > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         Ok(i32::from_le_bytes([
@@ -54,7 +60,10 @@ pub trait Memory {
         ]))
     }
     fn get_i64(&self, offset: usize) -> Result<i64, Fault> {
-        if offset + 8 > self.size() {
+        let Some(end) = offset.checked_add(8) else {
+            return Err(Fault::MemoryOutOfBounds);
+        };
+        if end > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         Ok(i64::from_le_bytes([
@@ -69,7 +78,10 @@ pub trait Memory {
         ]))
     }
     fn get_u32(&self, offset: usize) -> Result<u32, Fault> {
-        if offset + 4 > self.size() {
+        let Some(end) = offset.checked_add(4) else {
+            return Err(Fault::MemoryOutOfBounds);
+        };
+        if end > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         Ok(u32::from_le_bytes([
@@ -80,7 +92,10 @@ pub trait Memory {
         ]))
     }
     fn get_u64(&self, offset: usize) -> Result<u64, Fault> {
-        if offset + 8 > self.size() {
+        let Some(end) = offset.checked_add(8) else {
+            return Err(Fault::MemoryOutOfBounds);
+        };
+        if end > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         Ok(u64::from_le_bytes([
@@ -111,43 +126,58 @@ pub trait Memory {
         Ok(())
     }
     fn set_u16(&mut self, offset: usize, value: u16) -> Result<(), Fault> {
-        if offset + 2 > self.size() {
+        let Some(end) = offset.checked_add(2) else {
+            return Err(Fault::MemoryOutOfBounds);
+        };
+        if end > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         let bytes = value.to_le_bytes();
-        self.data_mut()[offset..offset + 2].copy_from_slice(&bytes);
+        self.data_mut()[offset..end].copy_from_slice(&bytes);
         Ok(())
     }
     fn set_i32(&mut self, offset: usize, value: i32) -> Result<(), Fault> {
-        if offset + 4 > self.size() {
+        let Some(end) = offset.checked_add(4) else {
+            return Err(Fault::MemoryOutOfBounds);
+        };
+        if end > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         let bytes = value.to_le_bytes();
-        self.data_mut()[offset..offset + 4].copy_from_slice(&bytes);
+        self.data_mut()[offset..end].copy_from_slice(&bytes);
         Ok(())
     }
     fn set_i64(&mut self, offset: usize, value: i64) -> Result<(), Fault> {
-        if offset + 8 > self.size() {
+        let Some(end) = offset.checked_add(8) else {
+            return Err(Fault::MemoryOutOfBounds);
+        };
+        if end > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         let bytes = value.to_le_bytes();
-        self.data_mut()[offset..offset + 8].copy_from_slice(&bytes);
+        self.data_mut()[offset..end].copy_from_slice(&bytes);
         Ok(())
     }
     fn set_u32(&mut self, offset: usize, value: u32) -> Result<(), Fault> {
-        if offset + 4 > self.size() {
+        let Some(end) = offset.checked_add(4) else {
+            return Err(Fault::MemoryOutOfBounds);
+        };
+        if end > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         let bytes = value.to_le_bytes();
-        self.data_mut()[offset..offset + 4].copy_from_slice(&bytes);
+        self.data_mut()[offset..end].copy_from_slice(&bytes);
         Ok(())
     }
     fn set_u64(&mut self, offset: usize, value: u64) -> Result<(), Fault> {
-        if offset + 8 > self.size() {
+        let Some(end) = offset.checked_add(8) else {
+            return Err(Fault::MemoryOutOfBounds);
+        };
+        if end > self.size() {
             return Err(Fault::MemoryOutOfBounds);
         }
         let bytes = value.to_le_bytes();
-        self.data_mut()[offset..offset + 8].copy_from_slice(&bytes);
+        self.data_mut()[offset..end].copy_from_slice(&bytes);
         Ok(())
     }
     fn set_f32(&mut self, offset: usize, value: f32) -> Result<(), Fault> {
