@@ -38,17 +38,25 @@ fn register_detached_snapshot(
     module: &Module,
     memories: &[VectorMemory],
     globals: &[GlobalVar],
-    programs: &[Program],
+    programs: &[Rc<Program>],
     tables: &[TableInstance],
     element_segments: &[Option<Vec<Value>>],
     data_segments: &[Option<Vec<u8>>],
 ) {
+    let program_local_defaults = build_program_local_defaults(module, programs);
+    let function_param_types = build_function_param_types(module);
+    let function_scope_signatures = build_function_scope_signatures(programs);
     register_detached_instance(Instance {
         owner_id,
         module: module.clone(),
         memories: memories.to_vec(),
         globals: globals.to_vec(),
         programs: programs.to_vec(),
+        function_param_types,
+        function_scope_signatures,
+        program_local_defaults,
+        num_imported_functions: count_function_imports(module),
+        function_type_mapping: build_function_type_mapping(module),
         tables: tables.to_vec(),
         element_segments: element_segments.to_vec(),
         data_segments: data_segments.to_vec(),
@@ -92,12 +100,107 @@ impl Display for LinkError {
 
 impl Error for LinkError {}
 
+fn build_function_type_mapping(module: &Module) -> Vec<usize> {
+    let mut function_type_mapping = Vec::new();
+
+    // Add imported functions first.
+    for (_, _, import) in &module.imports {
+        if let crate::module::Import::Func(type_idx) = import {
+            function_type_mapping.push(*type_idx as usize);
+        }
+    }
+
+    // Then add local functions.
+    function_type_mapping.extend(module.functions.iter().copied());
+    function_type_mapping
+}
+
+fn default_value_for_type(local_type: ValueType) -> Value {
+    match local_type {
+        ValueType::I32 => Value::I32(0),
+        ValueType::I64 => Value::I64(0),
+        ValueType::F32 => Value::F32(0.0),
+        ValueType::F64 => Value::F64(0.0),
+        ValueType::Unit => Value::Unit,
+        ValueType::V128 => Value::V128(0),
+        ValueType::FuncRef => Value::FuncRef(None),
+        ValueType::ExternRef => Value::ExternRef(None),
+    }
+}
+
+fn build_program_local_defaults(module: &Module, programs: &[Rc<Program>]) -> Vec<Vec<Value>> {
+    let mut defaults = Vec::with_capacity(programs.len());
+    for (i, program) in programs.iter().enumerate() {
+        let typeidx = module.functions[i];
+        let param_count = module.types[typeidx].params.len();
+        let mut function_defaults =
+            Vec::with_capacity(program.local_types.len().saturating_sub(param_count));
+        for local_type in &program.local_types[param_count..] {
+            function_defaults.push(default_value_for_type(*local_type));
+        }
+        defaults.push(function_defaults);
+    }
+    defaults
+}
+
+fn build_function_param_types(module: &Module) -> Vec<Vec<ValueType>> {
+    module
+        .functions
+        .iter()
+        .map(|&typeidx| module.types[typeidx].params.clone())
+        .collect()
+}
+
+fn build_function_scope_signatures(programs: &[Rc<Program>]) -> Vec<Type> {
+    programs
+        .iter()
+        .map(|program| {
+            if program.return_types.is_empty() {
+                Type::ValueType(ValueType::Unit)
+            } else if program.return_types.len() == 1 {
+                Type::ValueType(program.return_types[0])
+            } else {
+                Type::FunctionType(crate::FuncType {
+                    params: vec![],
+                    results: program.return_types.clone(),
+                })
+            }
+        })
+        .collect()
+}
+
+#[inline(always)]
+fn pop_value_for_type(value_type: ValueType, stack: &mut Stack) -> Result<Value, Fault> {
+    Ok(match value_type {
+        ValueType::I32 => Value::I32(stack.pop_i32()?),
+        ValueType::I64 => Value::I64(stack.pop_i64()?),
+        ValueType::F32 => Value::F32(stack.pop_f32()?),
+        ValueType::F64 => Value::F64(stack.pop_f64()?),
+        _ => Value::pop_from(value_type, stack)?,
+    })
+}
+
+fn count_function_imports(module: &Module) -> u32 {
+    let mut count = 0;
+    for (_, _, import) in &module.imports {
+        if matches!(import, crate::module::Import::Func(_)) {
+            count += 1;
+        }
+    }
+    count
+}
+
 pub struct Instance {
     pub owner_id: u32,
     pub module: Module,
     pub memories: Vec<VectorMemory>,
     pub globals: Vec<GlobalVar>,
-    pub programs: Vec<Program>,
+    pub programs: Vec<Rc<Program>>,
+    pub function_param_types: Vec<Vec<ValueType>>,
+    pub function_scope_signatures: Vec<Type>,
+    pub program_local_defaults: Vec<Vec<Value>>,
+    pub num_imported_functions: u32,
+    pub function_type_mapping: Vec<usize>,
     pub tables: Vec<TableInstance>,
     pub element_segments: Vec<Option<Vec<Value>>>,
     pub data_segments: Vec<Option<Vec<u8>>>,
@@ -226,7 +329,7 @@ fn mk_instance_internal(
         program.local_types = local_types;
         program.return_types = module.types[typeidx].results.clone();
 
-        programs.push(program);
+        programs.push(Rc::new(program));
     }
 
     // Populate globals early (imported first, then local) so subsequent table/element/data
@@ -647,12 +750,22 @@ fn mk_instance_internal(
         }
     }
 
+    let num_imported_functions = count_function_imports(&module);
+    let function_type_mapping = build_function_type_mapping(&module);
+    let program_local_defaults = build_program_local_defaults(&module, &programs);
+    let function_param_types = build_function_param_types(&module);
+    let function_scope_signatures = build_function_scope_signatures(&programs);
     let instance = Instance {
         owner_id,
         module,
         memories,
         globals,
         programs,
+        function_param_types,
+        function_scope_signatures,
+        program_local_defaults,
+        num_imported_functions,
+        function_type_mapping,
         tables,
         element_segments,
         data_segments,
@@ -698,6 +811,10 @@ fn mk_instance_internal(
 }
 
 impl Instance {
+    pub fn function_type_mapping(&self) -> &[usize] {
+        &self.function_type_mapping
+    }
+
     fn find_exportidx(&self, name: &str, kind: crate::module::ImportExportKind) -> Option<u32> {
         for export in &self.module.exports {
             if export.name == name && export.kind == kind {
@@ -762,16 +879,7 @@ impl Instance {
     pub fn frame_for_funcidx(&self, index: u32, args: &[Value]) -> Result<Frame, LinkError> {
         // Funcidx must consider also the imports, it isn't just an offset into `code` section.
         // Function index space: [imported_functions] + [local_functions]
-        // Count imported functions from the module's import section
-        let mut num_imported_funcs = 0;
-        for (_, _, import) in self.module.imports.iter() {
-            match import {
-                crate::module::Import::Func(_type_idx) => {
-                    num_imported_funcs += 1;
-                }
-                _ => continue,
-            }
-        }
+        let num_imported_funcs = self.num_imported_functions;
 
         // If index is within imported functions range, we can't create a frame for it
         // (imported functions are dispatched via continuation mechanism)
@@ -780,11 +888,13 @@ impl Instance {
                 "Cannot create frame for imported function - use continuation dispatch".to_string(),
             ));
         }
-        let funcidx = index - num_imported_funcs;
-        let typeindx = self.module.functions[funcidx as usize];
-        // Types of arguments must match the function signature
-        for (i, (expected, actual)) in self.module.types[typeindx]
-            .params
+        let index = (index - num_imported_funcs) as usize;
+        if index >= self.programs.len() {
+            return Err(LinkError::FunctionNotFound);
+        }
+
+        // Types of arguments must match the function signature.
+        for (i, (expected, actual)) in self.function_param_types[index]
             .iter()
             .zip(args.iter())
             .enumerate()
@@ -798,56 +908,149 @@ impl Instance {
                 ));
             }
         }
-        let index = (index - num_imported_funcs) as usize;
-        if index >= self.programs.len() {
-            return Err(LinkError::FunctionNotFound);
-        }
+
         let program = &self.programs[index];
         let num_locals = program.local_types.len();
-        let mut locals = args.to_vec();
+        let mut locals = Vec::with_capacity(num_locals);
+        locals.extend_from_slice(args);
 
-        // Initialize remaining local variables to their zero values based on their types
-        for i in args.len()..num_locals {
-            let local_type = program.local_types[i];
-            let zero_value = match local_type {
-                ValueType::I32 => Value::I32(0),
-                ValueType::I64 => Value::I64(0),
-                ValueType::F32 => Value::F32(0.0),
-                ValueType::F64 => Value::F64(0.0),
-                ValueType::Unit => Value::Unit,
-                ValueType::V128 => Value::V128(0),
-                ValueType::FuncRef => Value::FuncRef(None),
-                ValueType::ExternRef => Value::ExternRef(None),
-            };
-            locals.push(zero_value);
-        }
+        locals.extend_from_slice(&self.program_local_defaults[index]);
 
-        let return_types = program.return_types.clone();
         let mut frame = Frame {
             locals,
-            return_types,
-            program: program.clone(),
+            program: Rc::clone(program),
             stack: Stack::new(),
             pc: 0,
             control_stack: vec![],
-        };
-
-        // Add function scope to control stack for proper branching
-        // The function signature for branching purposes uses the function's return type
-        let func_signature = if frame.return_types.is_empty() {
-            Type::ValueType(ValueType::Unit)
-        } else if frame.return_types.len() == 1 {
-            Type::ValueType(frame.return_types[0])
-        } else {
-            Type::FunctionType(crate::FuncType {
-                params: vec![],
-                results: frame.return_types.clone(),
-            })
+            scratch_values: vec![],
         };
 
         // Add function scope for proper control flow management
-        frame.push_control(func_signature, ScopeType::Function);
+        frame.push_control(
+            self.function_scope_signatures[index].clone(),
+            ScopeType::Function,
+            0,
+            program.ops.len(),
+        );
         Ok(frame)
+    }
+
+    pub fn frame_for_funcidx_from_stack(
+        &self,
+        index: u32,
+        stack: &mut Stack,
+    ) -> Result<Frame, Fault> {
+        let num_imported_funcs = self.num_imported_functions;
+        if index < num_imported_funcs {
+            return Err(Fault::GlobalIndexOutOfBounds);
+        }
+
+        let funcidx = index - num_imported_funcs;
+        let index = funcidx as usize;
+        if index >= self.programs.len() {
+            return Err(Fault::GlobalIndexOutOfBounds);
+        }
+
+        let program = &self.programs[index];
+        let param_types = &self.function_param_types[index];
+        let param_count = param_types.len();
+        let local_defaults = &self.program_local_defaults[index];
+        let mut locals = vec![Value::Unit; param_count + local_defaults.len()];
+        match param_count {
+            0 => {}
+            1 => {
+                locals[0] = pop_value_for_type(param_types[0], stack)?;
+            }
+            2 => {
+                locals[1] = pop_value_for_type(param_types[1], stack)?;
+                locals[0] = pop_value_for_type(param_types[0], stack)?;
+            }
+            _ => {
+                for i in (0..param_count).rev() {
+                    locals[i] = pop_value_for_type(param_types[i], stack)?;
+                }
+            }
+        }
+        if !local_defaults.is_empty() {
+            locals[param_count..].copy_from_slice(local_defaults);
+        }
+
+        let mut frame = Frame {
+            locals,
+            program: Rc::clone(program),
+            stack: Stack::new(),
+            pc: 0,
+            control_stack: vec![],
+            scratch_values: vec![],
+        };
+
+        frame.push_control(
+            self.function_scope_signatures[index].clone(),
+            ScopeType::Function,
+            0,
+            program.ops.len(),
+        );
+        Ok(frame)
+    }
+
+    pub fn refill_frame_for_funcidx_from_stack(
+        &self,
+        index: u32,
+        stack: &mut Stack,
+        frame: &mut Frame,
+    ) -> Result<(), Fault> {
+        let num_imported_funcs = self.num_imported_functions;
+        if index < num_imported_funcs {
+            return Err(Fault::GlobalIndexOutOfBounds);
+        }
+
+        let funcidx = index - num_imported_funcs;
+        let index = funcidx as usize;
+        if index >= self.programs.len() {
+            return Err(Fault::GlobalIndexOutOfBounds);
+        }
+
+        let program = &self.programs[index];
+        let param_types = &self.function_param_types[index];
+        let param_count = param_types.len();
+        let local_defaults = &self.program_local_defaults[index];
+        let total_locals = param_count + local_defaults.len();
+
+        frame.locals.resize(total_locals, Value::Unit);
+        match param_count {
+            0 => {}
+            1 => {
+                frame.locals[0] = pop_value_for_type(param_types[0], stack)?;
+            }
+            2 => {
+                frame.locals[1] = pop_value_for_type(param_types[1], stack)?;
+                frame.locals[0] = pop_value_for_type(param_types[0], stack)?;
+            }
+            _ => {
+                for i in (0..param_count).rev() {
+                    frame.locals[i] = pop_value_for_type(param_types[i], stack)?;
+                }
+            }
+        }
+        if !local_defaults.is_empty() {
+            frame.locals[param_count..].copy_from_slice(local_defaults);
+        }
+
+        if !Rc::ptr_eq(&frame.program, program) {
+            frame.program = Rc::clone(program);
+        }
+        frame.stack.shrink_to(0);
+        frame.pc = 0;
+        frame.control_stack.clear();
+        frame.scratch_values.clear();
+
+        frame.push_control(
+            self.function_scope_signatures[index].clone(),
+            ScopeType::Function,
+            0,
+            program.ops.len(),
+        );
+        Ok(())
     }
 
     pub fn frame_for_funcname(&self, name: &str, args: &[Value]) -> Result<Frame, LinkError> {
@@ -862,5 +1065,67 @@ impl Instance {
             }
         }
         Err(LinkError::FunctionNotFound)
+    }
+
+    pub fn refill_frame_for_funcidx(
+        &self,
+        index: u32,
+        args: &[Value],
+        frame: &mut Frame,
+    ) -> Result<(), LinkError> {
+        let num_imported_funcs = self.num_imported_functions;
+        if index < num_imported_funcs {
+            return Err(LinkError::UnsupportedFeature(
+                "Cannot create frame for imported function - use continuation dispatch".to_string(),
+            ));
+        }
+
+        let local_idx = (index - num_imported_funcs) as usize;
+        if local_idx >= self.programs.len() {
+            return Err(LinkError::FunctionNotFound);
+        }
+
+        for (i, (expected, actual)) in self.function_param_types[local_idx]
+            .iter()
+            .zip(args.iter())
+            .enumerate()
+        {
+            if *expected != actual.type_of() {
+                return Err(LinkError::ArgumentTypeMismatch(
+                    i,
+                    *expected,
+                    actual.type_of(),
+                ));
+            }
+        }
+
+        let param_count = self.function_param_types[local_idx].len();
+        let local_defaults = &self.program_local_defaults[local_idx];
+        let total_locals = param_count + local_defaults.len();
+
+        frame.locals.resize(total_locals, Value::Unit);
+        for (i, arg) in args.iter().take(param_count).enumerate() {
+            frame.locals[i] = *arg;
+        }
+        if !local_defaults.is_empty() {
+            frame.locals[param_count..].copy_from_slice(local_defaults);
+        }
+
+        let program = &self.programs[local_idx];
+        if !Rc::ptr_eq(&frame.program, program) {
+            frame.program = Rc::clone(program);
+        }
+        frame.stack.shrink_to(0);
+        frame.pc = 0;
+        frame.control_stack.clear();
+        frame.scratch_values.clear();
+
+        frame.push_control(
+            self.function_scope_signatures[local_idx].clone(),
+            ScopeType::Function,
+            0,
+            program.ops.len(),
+        );
+        Ok(())
     }
 }

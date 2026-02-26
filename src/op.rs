@@ -39,6 +39,9 @@ pub enum Op {
     Else,
     Br(u32),
     BrIf(u32),
+    // Peephole-fused branch conditions for hot loop patterns.
+    BrIfLocalI64Eqz(u32, u32),     // (local_idx, depth)
+    BrIfLocalI32GeU(u32, u32, u32), // (lhs_local, rhs_local, depth)
     BrTable(Vec<u32>, u32),
     Return,
 
@@ -53,6 +56,12 @@ pub enum Op {
     GetLocal(u32),
     SetLocal(u32),
     TeeLocal(u32),
+    // Peephole-fused integer local arithmetic superinstructions.
+    I32LocalMulAddConst(u32, i32, i32),         // push(local[src] * mul + add)
+    I32LocalMulAddConstSet(u32, i32, i32, u32), // local[dst] = local[src] * mul + add
+    I32LocalAddConstSet(u32, i32, u32),         // local[dst] = local[src] + add
+    I64LocalAddSet(u32, u32, u32),              // local[dst] = local[a] + local[b]
+    I64LocalSubConstSet(u32, i64, u32),         // local[dst] = local[src] - c
     GetGlobal(u32),
     SetGlobal(u32),
 

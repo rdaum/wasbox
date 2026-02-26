@@ -15,72 +15,77 @@ use crate::decode::{Program, ScopeType};
 use crate::exec::{Fault, Value};
 use crate::stack::Stack;
 use crate::{Type, ValueType};
+use std::rc::Rc;
 
 pub struct Frame {
     pub locals: Vec<Value>,
-    pub return_types: Vec<ValueType>,
-    pub program: Program,
+    pub program: Rc<Program>,
     pub stack: Stack,
     pub pc: usize,
     pub control_stack: Vec<Control>,
+    pub scratch_values: Vec<Value>,
 }
 
 pub struct Control {
     pub signature: Type,
     pub scope_type: ScopeType,
     pub stack_width: usize,
+    pub start_pc: usize,
+    pub end_pc: usize,
 }
 
 impl Frame {
-    pub fn new(num_locals: usize, program: Program) -> Self {
-        let return_types = program.return_types.clone();
+    pub fn new(num_locals: usize, program: Rc<Program>) -> Self {
         Frame {
             locals: vec![Value::Unit; num_locals],
             stack: Stack::new(),
             pc: 0,
             program,
             control_stack: vec![],
-            return_types,
+            scratch_values: vec![],
         }
     }
 
-    pub fn push_control(&mut self, signature: Type, scope_type: ScopeType) {
+    pub fn push_control(
+        &mut self,
+        signature: Type,
+        scope_type: ScopeType,
+        start_pc: usize,
+        end_pc: usize,
+    ) {
         self.control_stack.push(Control {
             signature,
             scope_type,
             stack_width: self.stack.width(),
+            start_pc,
+            end_pc,
         });
     }
 
-    pub fn pop_control(&mut self) -> Result<(Control, Vec<Value>), Fault> {
+    pub fn pop_control(&mut self) -> Result<Control, Fault> {
         let c = self
             .control_stack
             .pop()
             .ok_or(Fault::ControlStackUnderflow)?;
 
-        // Pop the result values BEFORE shrinking the stack
-        let results = match &c.signature {
+        // Pop the result values BEFORE shrinking the stack and stash in reusable scratch.
+        self.scratch_values.clear();
+        match &c.signature {
             Type::ValueType(vt) => {
                 if *vt != ValueType::Unit {
-                    vec![Value::pop_from(*vt, &mut self.stack)?]
-                } else {
-                    vec![]
+                    self.scratch_values
+                        .push(Value::pop_from(*vt, &mut self.stack)?);
                 }
             }
             Type::FunctionType(ft) => {
-                // Pre-allocate and assign by index to avoid double-reverse
-                let mut results = vec![Value::Unit; ft.results.len()];
+                self.scratch_values.resize(ft.results.len(), Value::Unit);
                 for (i, vt) in ft.results.iter().enumerate().rev() {
-                    results[i] = Value::pop_from(*vt, &mut self.stack)?;
+                    self.scratch_values[i] = Value::pop_from(*vt, &mut self.stack)?;
                 }
-                results
             }
-        };
+        }
 
-        // Note: We don't shrink the stack here - that's the caller's responsibility
-        // The caller can decide whether to shrink the stack and push results back
-
-        Ok((c, results))
+        Ok(c)
     }
 
     pub fn push_local_to_stack(&mut self, local_index: u32) -> Result<(), Fault> {

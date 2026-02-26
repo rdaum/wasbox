@@ -26,12 +26,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
+use std::rc::Rc;
 
 /// How many ticks we allow before we stop execution when running expressions during the link
 /// phase (Active data expressions etc)
 const EXPR_TICK_LIMIT: usize = 1 << 10;
 /// Default tick limit for normal program execution.
 const EXEC_TICK_LIMIT: usize = 1 << 24;
+/// Upper bound for retained reusable frames to avoid unbounded memory growth.
+const FRAME_POOL_LIMIT: usize = 1024;
 
 pub enum Continuation {
     Call(u32),
@@ -299,76 +302,66 @@ fn execute_branch(frame: &mut Frame, depth: usize) -> Result<(), Fault> {
         return Err(Fault::ControlStackUnderflow);
     }
 
-    // Find the target control block using WASM branch semantics
-    // All scopes are valid branch targets: Block, Loop, Function, and IfElse
-    let mut target_idx = None;
-
-    for (branch_target_count, (i, _control)) in
-        frame.control_stack.iter().enumerate().rev().enumerate()
-    {
-        // All control scopes are valid branch targets
-        if branch_target_count == depth {
-            target_idx = Some(i);
-            break;
-        }
-    }
-
-    let target_idx = target_idx.ok_or(Fault::ControlStackUnderflow)?;
+    // All control scopes are valid branch targets. Depth is counted from innermost scope.
+    let target_idx = frame
+        .control_stack
+        .len()
+        .checked_sub(1 + depth)
+        .ok_or(Fault::ControlStackUnderflow)?;
     let target_scope_type = frame.control_stack[target_idx].scope_type;
     let pop_depth = match target_scope_type {
         ScopeType::Loop => frame.control_stack.len() - 1 - target_idx, // Don't pop the loop
         _ => frame.control_stack.len() - target_idx, // Pop the target block/function too
     };
 
-    // Get the target control block's signature to know what values it expects
-    let target_signature = frame.control_stack[target_idx].signature.clone();
+    // Capture target metadata before mutating control stack.
     let target_stack_width = frame.control_stack[target_idx].stack_width;
+    let target_start_pc = frame.control_stack[target_idx].start_pc;
+    let target_end_pc = frame.control_stack[target_idx].end_pc;
 
     // Pop the branch values from the stack (these will be provided to the target label).
     // For loop labels, branch arity is the loop parameter arity. For all other labels,
     // branch arity is the block result arity.
-    let branch_values = match (&target_signature, target_scope_type) {
-        (Type::ValueType(vt), ScopeType::Loop) => {
+    frame.scratch_values.clear();
+    match (&frame.control_stack[target_idx].signature, target_scope_type) {
+        (Type::ValueType(_), ScopeType::Loop) => {
             // Value-typed loop blocks have no explicit params in MVP encoding.
-            let _ = vt;
-            vec![]
         }
         (Type::FunctionType(ft), ScopeType::Loop) => {
-            let mut branch_values = vec![Value::Unit; ft.params.len()];
+            frame.scratch_values.resize(ft.params.len(), Value::Unit);
             for (i, vt) in ft.params.iter().enumerate().rev() {
-                branch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
+                frame.scratch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
             }
-            branch_values
         }
         (Type::ValueType(vt), _) => {
             if *vt != ValueType::Unit && frame.stack.width() > 0 {
-                vec![Value::pop_from(*vt, &mut frame.stack)?]
-            } else {
-                vec![]
+                frame
+                    .scratch_values
+                    .push(Value::pop_from(*vt, &mut frame.stack)?);
             }
         }
         (Type::FunctionType(ft), _) => {
-            let mut branch_values = vec![Value::Unit; ft.results.len()];
+            frame.scratch_values.resize(ft.results.len(), Value::Unit);
             for (i, vt) in ft.results.iter().enumerate().rev() {
-                branch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
+                frame.scratch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
             }
-            branch_values
         }
-    };
-
-    // Pop all the control blocks up to (but not including) the target
-    for _ in 0..pop_depth {
-        let _c = frame
-            .control_stack
-            .pop()
-            .ok_or(Fault::ControlStackUnderflow)?;
     }
+
+    // Pop all the control blocks up to (but not including) the target for loops;
+    // for non-loops this also pops the target.
+    let new_control_len = frame
+        .control_stack
+        .len()
+        .checked_sub(pop_depth)
+        .ok_or(Fault::ControlStackUnderflow)?;
+    frame.control_stack.truncate(new_control_len);
 
     // Shrink stack to the target block's width
     frame.stack.shrink_to(target_stack_width);
 
     // Now provide the branch values to the target block
-    for value in branch_values {
+    for value in &frame.scratch_values {
         value.push_to(&mut frame.stack);
     }
 
@@ -379,44 +372,12 @@ fn execute_branch(frame: &mut Frame, depth: usize) -> Result<(), Fault> {
             frame.pc = frame.program.ops.len(); // This will cause the main loop to exit
         }
         ScopeType::Loop => {
-            // For loops, branch to the beginning of the loop (where StartScope is)
-            // Scan backward to find the corresponding StartScope
-            let mut loop_depth = 0;
-            let mut target_pc = frame.pc;
-
-            for i in (0..frame.pc).rev() {
-                match &frame.program.ops[i] {
-                    Op::EndScope(ScopeType::Loop) => loop_depth += 1,
-                    Op::StartScope(_, ScopeType::Loop) if loop_depth == 0 => {
-                        target_pc = i + 1; // Jump to instruction after StartScope
-                        break;
-                    }
-                    Op::StartScope(_, ScopeType::Loop) => loop_depth -= 1,
-                    _ => {}
-                }
-            }
-            frame.pc = target_pc;
+            // Branching to loop label jumps to loop body (immediately after StartScope).
+            frame.pc = target_start_pc.saturating_add(1);
         }
         _ => {
-            // For Block, IfElse, Function: branch to the end (after EndScope)
-            // Since we've popped the target scope too, we need to find its EndScope
-            // The scope depth should account for the fact that we popped all intervening scopes AND the target
-            let mut scope_depth = pop_depth - 1; // -1 because we also popped the target
-
-            while frame.pc < frame.program.ops.len() {
-                match &frame.program.ops[frame.pc] {
-                    Op::StartScope(_, _) => scope_depth += 1,
-                    Op::EndScope(_) => {
-                        if scope_depth == 0 {
-                            frame.pc += 1; // Jump past the EndScope
-                            break;
-                        }
-                        scope_depth -= 1;
-                    }
-                    _ => {}
-                }
-                frame.pc += 1;
-            }
+            // For block/if labels, jump to instruction after matching EndScope.
+            frame.pc = target_end_pc.saturating_add(1);
         }
     }
 
@@ -436,6 +397,13 @@ fn pop_table_value(stack: &mut Stack, ref_type: ReferenceType) -> Result<Value, 
     }
 }
 
+#[inline(always)]
+fn table_elements_unchecked(table: &TableInstance) -> &Vec<Option<Value>> {
+    // Fast immutable read path for table lookups in the interpreter hot loop.
+    // Execution is single-threaded; mutable table ops are not interleaved with this borrow.
+    unsafe { &*table.elements.as_ptr() }
+}
+
 fn validate_range(start: u32, len: u32, total_len: usize) -> Result<(usize, usize), Fault> {
     let start = start as usize;
     let len = len as usize;
@@ -446,7 +414,7 @@ fn validate_range(start: u32, len: u32, total_len: usize) -> Result<(usize, usiz
     Ok((start, end))
 }
 
-fn execute(
+fn execute<const TRACK_TICKS: bool>(
     frame: &mut Frame,
     memories: &mut [&mut dyn Memory],
     globals: &mut [GlobalVar],
@@ -457,6 +425,7 @@ fn execute(
     types: &[FuncType],
     functions: &[usize],
     current_module_id: u32,
+    current_module_owner_id: u32,
 ) -> Result<(Continuation, usize), Fault> {
     let mut ticks_used = 0;
     loop {
@@ -466,136 +435,139 @@ fn execute(
             // We've reached the end of the program
             return Ok((Continuation::ProgramEnd, ticks_used));
         }
-        ticks_used += 1;
-        if ticks_used >= max_ticks {
-            return Err(Fault::OutOfTicks);
+        if TRACK_TICKS {
+            ticks_used += 1;
+            if ticks_used >= max_ticks {
+                return Err(Fault::OutOfTicks);
+            }
         }
         frame.pc += 1;
-        let op = frame.program.ops[pc].clone();
+        let op_ref = &frame.program.ops[pc];
 
-        match op {
-            Op::Nop => {}
-            Op::Unreachable => {
-                return Err(Fault::Unreachable);
-            }
+        // Hot-path dispatch without cloning.
+        match op_ref {
+            Op::Nop => continue,
+            Op::Unreachable => return Err(Fault::Unreachable),
             Op::StartScope(sig, scope_type) => {
-                let resolved_type = resolve_type(types, sig)?;
-                frame.push_control(resolved_type, scope_type);
+                let resolved_type = resolve_type(types, *sig)?;
+                let end_pc = frame.program.scope_end_jumps[pc];
+                if end_pc == usize::MAX {
+                    return Err(Fault::Unreachable);
+                }
+                frame.push_control(resolved_type, *scope_type, pc, end_pc);
+                continue;
             }
             Op::EndScope(c) => {
                 // If this is EndScope(Program), we need to preserve the stack for return value.
-                if let ScopeType::Program = &c {
+                if matches!(c, ScopeType::Program) {
                     return Ok((Continuation::DoneReturn, ticks_used));
                 }
-                let (end_scope, result_values) = frame.pop_control()?;
+                let end_scope = frame.pop_control()?;
 
                 // Shrink-stack to the width declared in the control scope.
                 frame.stack.shrink_to(end_scope.stack_width);
-                for value in result_values {
+                for value in &frame.scratch_values {
                     value.push_to(&mut frame.stack);
                 }
+                continue;
             }
             Op::If => {
-                // Pop condition from stack, evaluate.
                 let condition = frame.stack.pop_u32()?;
                 if condition == 0 {
-                    // Skip to else block or end of if - scan forward to find it
-                    let mut depth = 0;
-                    let _start_pc = frame.pc;
-
-                    while frame.pc < frame.program.ops.len() {
-                        match &frame.program.ops[frame.pc] {
-                            Op::StartScope(_, ScopeType::IfElse) => depth += 1,
-                            Op::Else if depth == 0 => {
-                                frame.pc += 1; // Move past the Else op
-                                break;
-                            }
-                            Op::EndScope(ScopeType::IfElse) if depth == 0 => {
-                                break; // No else block, go to end
-                            }
-                            Op::EndScope(ScopeType::IfElse) => depth -= 1,
-                            _ => {}
-                        }
-                        frame.pc += 1;
+                    let jump_target = frame.program.if_else_jumps[pc];
+                    if jump_target == usize::MAX {
+                        return Err(Fault::Unreachable);
                     }
-                } else {
-                    // Continue to then block (next instruction)
+                    frame.pc = jump_target;
                 }
+                continue;
             }
             Op::Else => {
-                // Skip to end of if block - scan forward to find matching EndScope
-                let mut depth = 0;
-
-                while frame.pc < frame.program.ops.len() {
-                    match &frame.program.ops[frame.pc] {
-                        Op::StartScope(_, ScopeType::IfElse) => depth += 1,
-                        Op::EndScope(ScopeType::IfElse) if depth == 0 => {
-                            break; // Found the end of this if block
-                        }
-                        Op::EndScope(ScopeType::IfElse) => depth -= 1,
-                        _ => {}
-                    }
-                    frame.pc += 1;
+                let jump_target = frame.program.if_else_jumps[pc];
+                if jump_target == usize::MAX {
+                    return Err(Fault::Unreachable);
                 }
+                frame.pc = jump_target;
+                continue;
             }
             Op::Br(depth) => {
-                execute_branch(frame, depth as usize)?;
+                execute_branch(frame, *depth as usize)?;
                 continue;
             }
             Op::BrIf(depth) => {
                 let condition = frame.stack.pop_u32()?;
                 if condition != 0 {
-                    execute_branch(frame, depth as usize)?;
+                    execute_branch(frame, *depth as usize)?;
                     continue;
                 }
+                continue;
+            }
+            Op::BrIfLocalI64Eqz(local_idx, depth) => {
+                if *local_idx as usize >= frame.locals.len() {
+                    return Err(Fault::LocalIndexOutOfBounds);
+                }
+                let Value::I64(v) = frame.locals[*local_idx as usize] else {
+                    return Err(Fault::Unreachable);
+                };
+                if v == 0 {
+                    execute_branch(frame, *depth as usize)?;
+                }
+                continue;
+            }
+            Op::BrIfLocalI32GeU(lhs_local, rhs_local, depth) => {
+                if *lhs_local as usize >= frame.locals.len() || *rhs_local as usize >= frame.locals.len() {
+                    return Err(Fault::LocalIndexOutOfBounds);
+                }
+                let Value::I32(lhs) = frame.locals[*lhs_local as usize] else {
+                    return Err(Fault::Unreachable);
+                };
+                let Value::I32(rhs) = frame.locals[*rhs_local as usize] else {
+                    return Err(Fault::Unreachable);
+                };
+                if (lhs as u32) >= (rhs as u32) {
+                    execute_branch(frame, *depth as usize)?;
+                }
+                continue;
             }
             Op::BrTable(table, default) => {
                 let index = frame.stack.pop_u32()? as usize;
                 let depth = if index < table.len() {
                     table[index]
                 } else {
-                    default
+                    *default
                 } as usize;
-
                 execute_branch(frame, depth)?;
                 continue;
             }
-            Op::Return => {
-                // Return immediately from function - don't pop control blocks, just exit
-                // The stack should contain the return value(s) for the function
-                return Ok((Continuation::DoneReturn, ticks_used));
-            }
-            Op::Call(c) => {
-                return Ok((Continuation::Call(c), ticks_used));
-            }
+            Op::Return => return Ok((Continuation::DoneReturn, ticks_used)),
+            Op::Call(c) => return Ok((Continuation::Call(*c), ticks_used)),
             Op::CallIndirect(_type_idx, table_idx) => {
                 // Pop the table index from the stack (the actual index to use)
                 let table_index = frame.stack.pop_u32()?;
 
                 // Look up the function reference in the specified table
-                if table_idx as usize >= tables.len() {
-                    return Err(Fault::UndefinedElement); // Table index out of bounds
+                if *table_idx as usize >= tables.len() {
+                    return Err(Fault::UndefinedElement);
                 }
-                let table = &tables[table_idx as usize];
-                let table_elements = table.elements.borrow();
+                let table = &tables[*table_idx as usize];
+                let table_elements = table_elements_unchecked(table);
 
                 if table_index as usize >= table_elements.len() {
-                    return Err(Fault::UndefinedElement); // Table index out of bounds
+                    return Err(Fault::UndefinedElement);
                 }
 
                 return match &table_elements[table_index as usize] {
-                    None => Err(Fault::UninitializedElement), // Uninitialized table element
+                    None => Err(Fault::UninitializedElement),
                     Some(Value::FuncRef(Some(func_ref))) => {
-                        // Type check: verify the function signature matches the expected type.
-                        if _type_idx as usize >= types.len() {
-                            return Err(Fault::UnresolvableTypeIndex(_type_idx));
+                        if *_type_idx as usize >= types.len() {
+                            return Err(Fault::UnresolvableTypeIndex(*_type_idx));
                         }
-                        let expected_type = &types[_type_idx as usize];
+                        let expected_type = &types[*_type_idx as usize];
 
-                        // For local module references we can type-check immediately. For external
-                        // references we defer type-checking to the cross-module dispatch path.
                         let target_module_id = func_ref.module_id;
-                        if target_module_id == current_module_id {
+                        if target_module_id == current_module_id
+                            || target_module_id == current_module_owner_id
+                        {
                             if (func_ref.func_idx as usize) >= functions.len() {
                                 return Err(Fault::UnresolvableTypeIndex(func_ref.func_idx));
                             }
@@ -603,11 +575,13 @@ fn execute(
                             if actual_type_idx >= types.len() {
                                 return Err(Fault::UnresolvableTypeIndex(actual_type_idx as u32));
                             }
-                            let actual_type = &types[actual_type_idx];
-                            if expected_type.params != actual_type.params
-                                || expected_type.results != actual_type.results
-                            {
-                                return Err(Fault::IndirectCallTypeMismatch);
+                            if actual_type_idx != *_type_idx as usize {
+                                let actual_type = &types[actual_type_idx];
+                                if expected_type.params != actual_type.params
+                                    || expected_type.results != actual_type.results
+                                {
+                                    return Err(Fault::IndirectCallTypeMismatch);
+                                }
                             }
                             Ok((Continuation::Call(func_ref.func_idx), ticks_used))
                         } else {
@@ -615,59 +589,469 @@ fn execute(
                                 Continuation::CallExternal {
                                     module_id: target_module_id,
                                     func_id: func_ref.func_idx,
-                                    expected_type: Some((current_module_id, _type_idx)),
+                                    expected_type: Some((current_module_id, *_type_idx)),
                                 },
                                 ticks_used,
                             ))
                         }
                     }
-                    Some(Value::FuncRef(None)) => Err(Fault::UninitializedElement), // Null function reference
-                    _ => Err(Fault::UndefinedElement), // Invalid table element
+                    Some(Value::FuncRef(None)) => Err(Fault::UninitializedElement),
+                    _ => Err(Fault::UndefinedElement),
                 };
+            }
+            Op::GetLocal(idx) => {
+                if *idx as usize >= frame.locals.len() {
+                    return Err(Fault::LocalIndexOutOfBounds);
+                }
+                frame.locals[*idx as usize].push_to(&mut frame.stack);
+                continue;
+            }
+            Op::SetLocal(idx) => {
+                if *idx as usize >= frame.locals.len() {
+                    return Err(Fault::LocalIndexOutOfBounds);
+                }
+                let type_of_local = frame.program.local_types[*idx as usize];
+                let value = Value::pop_from(type_of_local, &mut frame.stack)?;
+                frame.locals[*idx as usize] = value;
+                continue;
+            }
+            Op::TeeLocal(idx) => {
+                if *idx as usize >= frame.locals.len() {
+                    return Err(Fault::LocalIndexOutOfBounds);
+                }
+                let type_of_local = frame.program.local_types[*idx as usize];
+                let value = Value::top_of(type_of_local, &mut frame.stack)?;
+                frame.locals[*idx as usize] = value;
+                continue;
+            }
+            Op::I32LocalMulAddConst(src, mul, add) => {
+                if *src as usize >= frame.locals.len() {
+                    return Err(Fault::LocalIndexOutOfBounds);
+                }
+                let Value::I32(v) = frame.locals[*src as usize] else {
+                    return Err(Fault::Unreachable);
+                };
+                frame
+                    .stack
+                    .push_i32(v.wrapping_mul(*mul).wrapping_add(*add));
+                continue;
+            }
+            Op::I32LocalMulAddConstSet(src, mul, add, dst) => {
+                if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
+                    return Err(Fault::LocalIndexOutOfBounds);
+                }
+                let Value::I32(v) = frame.locals[*src as usize] else {
+                    return Err(Fault::Unreachable);
+                };
+                frame.locals[*dst as usize] = Value::I32(v.wrapping_mul(*mul).wrapping_add(*add));
+                continue;
+            }
+            Op::I32LocalAddConstSet(src, add, dst) => {
+                if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
+                    return Err(Fault::LocalIndexOutOfBounds);
+                }
+                let Value::I32(v) = frame.locals[*src as usize] else {
+                    return Err(Fault::Unreachable);
+                };
+                frame.locals[*dst as usize] = Value::I32(v.wrapping_add(*add));
+                continue;
+            }
+            Op::I64LocalAddSet(a, b, dst) => {
+                if *a as usize >= frame.locals.len()
+                    || *b as usize >= frame.locals.len()
+                    || *dst as usize >= frame.locals.len()
+                {
+                    return Err(Fault::LocalIndexOutOfBounds);
+                }
+                let Value::I64(av) = frame.locals[*a as usize] else {
+                    return Err(Fault::Unreachable);
+                };
+                let Value::I64(bv) = frame.locals[*b as usize] else {
+                    return Err(Fault::Unreachable);
+                };
+                frame.locals[*dst as usize] = Value::I64(av.wrapping_add(bv));
+                continue;
+            }
+            Op::I64LocalSubConstSet(src, c, dst) => {
+                if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
+                    return Err(Fault::LocalIndexOutOfBounds);
+                }
+                let Value::I64(v) = frame.locals[*src as usize] else {
+                    return Err(Fault::Unreachable);
+                };
+                frame.locals[*dst as usize] = Value::I64(v.wrapping_sub(*c));
+                continue;
+            }
+            Op::GetGlobal(g) => {
+                if *g as usize >= globals.len() {
+                    return Err(Fault::GlobalIndexOutOfBounds);
+                }
+                let gv = &globals[*g as usize];
+                gv.value.push_to(&mut frame.stack);
+                continue;
+            }
+            Op::SetGlobal(g) => {
+                if *g as usize >= globals.len() {
+                    return Err(Fault::GlobalIndexOutOfBounds);
+                }
+                let value = Value::pop_from(globals[*g as usize].decl.ty, &mut frame.stack)?;
+                globals[*g as usize].value = value;
+                continue;
             }
             Op::Drop => {
                 frame.stack.pop_u64()?;
+                continue;
             }
             Op::Select => {
-                //The select instruction returns its first operand if $condition is true, or its second operand otherwise.
                 let condition = frame.stack.pop_i32()?;
-                let val2 = frame.stack.pop_u64()?; // Second operand (popped first)
-                let val1 = frame.stack.pop_u64()?; // First operand (popped second)
+                let val2 = frame.stack.pop_u64()?;
+                let val1 = frame.stack.pop_u64()?;
                 if condition != 0 {
-                    frame.stack.push_u64(val1); // Return first operand if condition is true
+                    frame.stack.push_u64(val1);
                 } else {
-                    frame.stack.push_u64(val2); // Return second operand if condition is false
+                    frame.stack.push_u64(val2);
                 }
+                continue;
             }
-            Op::GetLocal(idx) => {
-                frame.push_local_to_stack(idx)?;
+            Op::I32Const(v) => {
+                frame.stack.push_i32(*v);
+                continue;
             }
-            Op::SetLocal(idx) => {
-                frame.set_local_from_stack(idx, true)?;
+            Op::I64Const(v) => {
+                frame.stack.push_i64(*v);
+                continue;
             }
-            Op::TeeLocal(idx) => {
-                frame.set_local_from_stack(idx, false)?;
+            Op::I32Eqz => {
+                let value = frame.stack.pop_i32()?;
+                frame.stack.push_u32(if value == 0 { 1 } else { 0 });
+                continue;
             }
-            Op::GetGlobal(g) => {
-                if g as usize >= globals.len() {
-                    return Err(Fault::GlobalIndexOutOfBounds);
-                }
-                let gv = &globals[g as usize];
-                gv.value.push_to(&mut frame.stack);
+            Op::I32Eq => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_u32(if a == b { 1 } else { 0 });
+                continue;
             }
-            Op::SetGlobal(g) => {
-                if g as usize >= globals.len() {
-                    return Err(Fault::GlobalIndexOutOfBounds);
-                }
-                let value = Value::pop_from(globals[g as usize].decl.ty, &mut frame.stack)?;
-                globals[g as usize].value = value;
+            Op::I32Ne => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_u32(if a != b { 1 } else { 0 });
+                continue;
             }
+            Op::I32LtS => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_u32(if a < b { 1 } else { 0 });
+                continue;
+            }
+            Op::I32LtU => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_u32()?;
+                frame.stack.push_u32(if a < b { 1 } else { 0 });
+                continue;
+            }
+            Op::I32GtS => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_u32(if a > b { 1 } else { 0 });
+                continue;
+            }
+            Op::I32GtU => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_u32()?;
+                frame.stack.push_u32(if a > b { 1 } else { 0 });
+                continue;
+            }
+            Op::I32LeS => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_u32(if a <= b { 1 } else { 0 });
+                continue;
+            }
+            Op::I32LeU => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_u32()?;
+                frame.stack.push_u32(if a <= b { 1 } else { 0 });
+                continue;
+            }
+            Op::I32GeS => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_u32(if a >= b { 1 } else { 0 });
+                continue;
+            }
+            Op::I32GeU => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_u32()?;
+                frame.stack.push_u32(if a >= b { 1 } else { 0 });
+                continue;
+            }
+            Op::I64Eqz => {
+                let value = frame.stack.pop_i64()?;
+                frame.stack.push_u32(if value == 0 { 1 } else { 0 });
+                continue;
+            }
+            Op::I64Eq => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_u32(if a == b { 1 } else { 0 });
+                continue;
+            }
+            Op::I64Ne => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_u32(if a != b { 1 } else { 0 });
+                continue;
+            }
+            Op::I64LtS => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_u32(if a < b { 1 } else { 0 });
+                continue;
+            }
+            Op::I64LtU => {
+                let b = frame.stack.pop_u64()?;
+                let a = frame.stack.pop_u64()?;
+                frame.stack.push_u32(if a < b { 1 } else { 0 });
+                continue;
+            }
+            Op::I64GtS => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_u32(if a > b { 1 } else { 0 });
+                continue;
+            }
+            Op::I64GtU => {
+                let b = frame.stack.pop_u64()?;
+                let a = frame.stack.pop_u64()?;
+                frame.stack.push_u32(if a > b { 1 } else { 0 });
+                continue;
+            }
+            Op::I64LeS => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_u32(if a <= b { 1 } else { 0 });
+                continue;
+            }
+            Op::I64LeU => {
+                let b = frame.stack.pop_u64()?;
+                let a = frame.stack.pop_u64()?;
+                frame.stack.push_u32(if a <= b { 1 } else { 0 });
+                continue;
+            }
+            Op::I64GeS => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_u32(if a >= b { 1 } else { 0 });
+                continue;
+            }
+            Op::I64GeU => {
+                let b = frame.stack.pop_u64()?;
+                let a = frame.stack.pop_u64()?;
+                frame.stack.push_u32(if a >= b { 1 } else { 0 });
+                continue;
+            }
+            Op::I32Add => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_i32(a.wrapping_add(b));
+                continue;
+            }
+            Op::I32Sub => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_i32(a.wrapping_sub(b));
+                continue;
+            }
+            Op::I32Mul => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_i32(a.wrapping_mul(b));
+                continue;
+            }
+            Op::I32And => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_i32(a & b);
+                continue;
+            }
+            Op::I32Or => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_i32(a | b);
+                continue;
+            }
+            Op::I32Xor => {
+                let b = frame.stack.pop_i32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_i32(a ^ b);
+                continue;
+            }
+            Op::I32Shl => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_i32(a.wrapping_shl(b));
+                continue;
+            }
+            Op::I32ShrS => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_i32(a.wrapping_shr(b));
+                continue;
+            }
+            Op::I32ShrU => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_u32()?;
+                frame.stack.push_u32(a.wrapping_shr(b));
+                continue;
+            }
+            Op::I32Rotl => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_i32(a.rotate_left(b));
+                continue;
+            }
+            Op::I32Rotr => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_i32()?;
+                frame.stack.push_i32(a.rotate_right(b));
+                continue;
+            }
+            Op::I64Add => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_i64(a.wrapping_add(b));
+                continue;
+            }
+            Op::I64Sub => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_i64(a.wrapping_sub(b));
+                continue;
+            }
+            Op::I64Mul => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_i64(a.wrapping_mul(b));
+                continue;
+            }
+            Op::I64And => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_i64(a & b);
+                continue;
+            }
+            Op::I64Or => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_i64(a | b);
+                continue;
+            }
+            Op::I64Xor => {
+                let b = frame.stack.pop_i64()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_i64(a ^ b);
+                continue;
+            }
+            Op::I64Shl => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_i64(a.wrapping_shl(b));
+                continue;
+            }
+            Op::I64ShrS => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_i64()?;
+                frame.stack.push_i64(a.wrapping_shr(b));
+                continue;
+            }
+            Op::I64ShrU => {
+                let b = frame.stack.pop_u32()?;
+                let a = frame.stack.pop_u64()?;
+                frame.stack.push_u64(a.wrapping_shr(b));
+                continue;
+            }
+            _ => {}
+        }
+
+        #[allow(unreachable_patterns)]
+        match op_ref {
+            Op::Nop
+            | Op::Unreachable
+            | Op::StartScope(_, _)
+            | Op::EndScope(_)
+            | Op::If
+            | Op::Else
+            | Op::Br(_)
+            | Op::BrIf(_)
+            | Op::BrIfLocalI64Eqz(_, _)
+            | Op::BrIfLocalI32GeU(_, _, _)
+            | Op::BrTable(_, _)
+            | Op::Return
+            | Op::Call(_)
+            | Op::CallIndirect(_, _)
+            | Op::GetLocal(_)
+            | Op::SetLocal(_)
+            | Op::TeeLocal(_)
+            | Op::I32LocalMulAddConst(_, _, _)
+            | Op::I32LocalMulAddConstSet(_, _, _, _)
+            | Op::I32LocalAddConstSet(_, _, _)
+            | Op::I64LocalAddSet(_, _, _)
+            | Op::I64LocalSubConstSet(_, _, _)
+            | Op::GetGlobal(_)
+            | Op::SetGlobal(_)
+            | Op::Drop
+            | Op::Select
+            | Op::I32Const(_)
+            | Op::I64Const(_)
+            | Op::I32Eqz
+            | Op::I32Eq
+            | Op::I32Ne
+            | Op::I32LtS
+            | Op::I32LtU
+            | Op::I32GtS
+            | Op::I32GtU
+            | Op::I32LeS
+            | Op::I32LeU
+            | Op::I32GeS
+            | Op::I32GeU
+            | Op::I64Eqz
+            | Op::I64Eq
+            | Op::I64Ne
+            | Op::I64LtS
+            | Op::I64LtU
+            | Op::I64GtS
+            | Op::I64GtU
+            | Op::I64LeS
+            | Op::I64LeU
+            | Op::I64GeS
+            | Op::I64GeU
+            | Op::I32Add
+            | Op::I32Sub
+            | Op::I32Mul
+            | Op::I32And
+            | Op::I32Or
+            | Op::I32Xor
+            | Op::I32Shl
+            | Op::I32ShrS
+            | Op::I32ShrU
+            | Op::I32Rotl
+            | Op::I32Rotr
+            | Op::I64Add
+            | Op::I64Sub
+            | Op::I64Mul
+            | Op::I64And
+            | Op::I64Or
+            | Op::I64Xor
+            | Op::I64Shl
+            | Op::I64ShrS
+            | Op::I64ShrU => unreachable!("handled by fast-path dispatch"),
             Op::TableGet(table_idx) => {
                 let idx = frame.stack.pop_u32()?;
-                if table_idx as usize >= tables.len() {
+                if *table_idx as usize >= tables.len() {
                     return Err(Fault::GlobalIndexOutOfBounds);
                 }
-                let table = &tables[table_idx as usize];
+                let table = &tables[*table_idx as usize];
                 let table_elements = table.elements.borrow();
                 if idx as usize >= table_elements.len() {
                     return Err(Fault::MemoryOutOfBounds);
@@ -678,10 +1062,10 @@ fn execute(
                 }
             }
             Op::TableSet(table_idx) => {
-                if table_idx as usize >= tables.len() {
+                if *table_idx as usize >= tables.len() {
                     return Err(Fault::GlobalIndexOutOfBounds);
                 }
-                let table = &mut tables[table_idx as usize];
+                let table = &mut tables[*table_idx as usize];
                 let value = pop_table_value(&mut frame.stack, table.ref_type)?;
 
                 let idx = frame.stack.pop_u32()?;
@@ -697,10 +1081,10 @@ fn execute(
                 let dst = frame.stack.pop_u32()?;
 
                 let table = tables
-                    .get_mut(table_idx as usize)
+                    .get_mut(*table_idx as usize)
                     .ok_or(Fault::GlobalIndexOutOfBounds)?;
                 let segment = element_segments
-                    .get(elem_idx as usize)
+                    .get(*elem_idx as usize)
                     .ok_or(Fault::GlobalIndexOutOfBounds)?;
                 let segment_values = segment.as_deref().unwrap_or(&[]);
 
@@ -713,7 +1097,7 @@ fn execute(
             }
             Op::ElemDrop(elem_idx) => {
                 let segment = element_segments
-                    .get_mut(elem_idx as usize)
+                    .get_mut(*elem_idx as usize)
                     .ok_or(Fault::GlobalIndexOutOfBounds)?;
                 *segment = None;
             }
@@ -722,8 +1106,8 @@ fn execute(
                 let src = frame.stack.pop_u32()?;
                 let dst = frame.stack.pop_u32()?;
 
-                let src_table_idx = src_table_idx as usize;
-                let dst_table_idx = dst_table_idx as usize;
+                let src_table_idx = *src_table_idx as usize;
+                let dst_table_idx = *dst_table_idx as usize;
                 if src_table_idx >= tables.len() || dst_table_idx >= tables.len() {
                     return Err(Fault::GlobalIndexOutOfBounds);
                 }
@@ -756,7 +1140,7 @@ fn execute(
             Op::TableGrow(table_idx) => {
                 let delta = frame.stack.pop_u32()?;
                 let table = tables
-                    .get_mut(table_idx as usize)
+                    .get_mut(*table_idx as usize)
                     .ok_or(Fault::GlobalIndexOutOfBounds)?;
                 let fill_value = pop_table_value(&mut frame.stack, table.ref_type)?;
 
@@ -777,7 +1161,7 @@ fn execute(
             }
             Op::TableSize(table_idx) => {
                 let table = tables
-                    .get(table_idx as usize)
+                    .get(*table_idx as usize)
                     .ok_or(Fault::GlobalIndexOutOfBounds)?;
                 let table_len = table.elements.borrow().len();
                 frame.stack.push_u32(table_len as u32);
@@ -785,7 +1169,7 @@ fn execute(
             Op::TableFill(table_idx) => {
                 let len = frame.stack.pop_u32()?;
                 let table = tables
-                    .get_mut(table_idx as usize)
+                    .get_mut(*table_idx as usize)
                     .ok_or(Fault::GlobalIndexOutOfBounds)?;
                 let value = pop_table_value(&mut frame.stack, table.ref_type)?;
                 let dst = frame.stack.pop_u32()?;
@@ -1011,10 +1395,10 @@ fn execute(
             }
 
             Op::I32Const(v) => {
-                frame.stack.push_i32(v);
+                frame.stack.push_i32(*v);
             }
             Op::I64Const(v) => {
-                frame.stack.push_i64(v);
+                frame.stack.push_i64(*v);
             }
             Op::F32Const(v) => {
                 frame.stack.push_u32(v.to_bits());
@@ -1024,7 +1408,7 @@ fn execute(
             }
             Op::MemorySize(mem_idx) => {
                 let memory = memories
-                    .get_mut(mem_idx as usize)
+                    .get_mut(*mem_idx as usize)
                     .ok_or(Fault::MemoryOutOfBounds)?;
                 let size_in_bytes = memory.size();
                 let size_in_pages = size_in_bytes / WASM_PAGE_SIZE;
@@ -1033,7 +1417,7 @@ fn execute(
             Op::MemoryGrow(mem_idx) => {
                 let delta = frame.stack.pop_i32()?;
                 let memory = memories
-                    .get_mut(mem_idx as usize)
+                    .get_mut(*mem_idx as usize)
                     .ok_or(Fault::MemoryOutOfBounds)?;
                 if delta < 0 {
                     frame.stack.push_i32(-1);
@@ -1060,10 +1444,10 @@ fn execute(
                 let dst = frame.stack.pop_u32()?;
 
                 let memory = memories
-                    .get_mut(mem_idx as usize)
+                    .get_mut(*mem_idx as usize)
                     .ok_or(Fault::MemoryOutOfBounds)?;
                 let data_segment = data_segments
-                    .get(data_idx as usize)
+                    .get(*data_idx as usize)
                     .ok_or(Fault::GlobalIndexOutOfBounds)?;
                 let data_bytes = data_segment.as_deref().unwrap_or(&[]);
 
@@ -1073,7 +1457,7 @@ fn execute(
             }
             Op::DataDrop(data_idx) => {
                 let data_segment = data_segments
-                    .get_mut(data_idx as usize)
+                    .get_mut(*data_idx as usize)
                     .ok_or(Fault::GlobalIndexOutOfBounds)?;
                 *data_segment = None;
             }
@@ -1082,8 +1466,8 @@ fn execute(
                 let src = frame.stack.pop_u32()?;
                 let dst = frame.stack.pop_u32()?;
 
-                let dst_mem_idx = dst_mem_idx as usize;
-                let src_mem_idx = src_mem_idx as usize;
+                let dst_mem_idx = *dst_mem_idx as usize;
+                let src_mem_idx = *src_mem_idx as usize;
                 if dst_mem_idx >= memories.len() || src_mem_idx >= memories.len() {
                     return Err(Fault::MemoryOutOfBounds);
                 }
@@ -1120,7 +1504,7 @@ fn execute(
                 let dst = frame.stack.pop_u32()?;
 
                 let memory = memories
-                    .get_mut(mem_idx as usize)
+                    .get_mut(*mem_idx as usize)
                     .ok_or(Fault::MemoryOutOfBounds)?;
                 let (dst_start, dst_end) = validate_range(dst, len, memory.size())?;
                 memory.data_mut()[dst_start..dst_end].fill(value);
@@ -1902,12 +2286,12 @@ fn execute(
             },
             Op::RefFunc(func_index) => {
                 // Validate func_index exists in the module's function index space
-                if (func_index as usize) >= functions.len() {
+                if (*func_index as usize) >= functions.len() {
                     return Err(Fault::GlobalIndexOutOfBounds);
                 }
                 frame.stack.push_ref(Some(encode_func_ref(FuncRef {
                     module_id: current_module_id,
-                    func_idx: func_index,
+                    func_idx: *func_index,
                 })));
             }
             Op::RefIsNull => {
@@ -1988,6 +2372,7 @@ fn decode_func_ref(raw: u64) -> FuncRef {
 }
 
 impl Value {
+    #[inline(always)]
     pub(crate) fn type_of(&self) -> ValueType {
         match self {
             Value::I32(_) => ValueType::I32,
@@ -2001,6 +2386,7 @@ impl Value {
         }
     }
 
+    #[inline(always)]
     pub fn pop_from(ty: ValueType, stack: &mut Stack) -> Result<Self, Fault> {
         Ok(match ty {
             ValueType::Unit => {
@@ -2020,6 +2406,7 @@ impl Value {
         })
     }
 
+    #[inline(always)]
     pub fn top_of(ty: ValueType, stack: &mut Stack) -> Result<Self, Fault> {
         Ok(match ty {
             ValueType::Unit => {
@@ -2053,6 +2440,7 @@ impl Value {
         })
     }
 
+    #[inline(always)]
     pub fn push_to(&self, stack: &mut Stack) {
         match self {
             Value::I32(v) => stack.push_i32(*v),
@@ -2106,15 +2494,15 @@ pub(crate) fn eval_init_expr(
     // Module::get_expr returns expression bytes without the terminating END opcode.
     // Always append it here; immediate bytes can legitimately be 0x0b (e.g. ref.func 11).
     expression.push(0x0b);
-    let const_program = decode(&expression).unwrap();
-    let return_types = vec![return_type];
+    let mut const_program = decode(&expression).unwrap();
+    const_program.return_types = vec![return_type];
     let mut global_exec_frame = Frame {
         locals: vec![Value::Unit; 0],
-        program: const_program,
+        program: Rc::new(const_program),
         stack: Stack::new(),
         pc: 0,
         control_stack: vec![],
-        return_types,
+        scratch_values: vec![],
     };
     // This little fragment, it doesn't get much memory and doesn't get *any* globals.
     // TODO: I don't actually know what a reasonable amount of memory is, so we'll just default
@@ -2131,7 +2519,7 @@ pub(crate) fn eval_init_expr(
     let mut const_prg_tables = vec![];
     let mut const_prg_element_segments = vec![];
     let mut const_prg_data_segments = vec![];
-    let result = execute(
+    let result = execute::<true>(
         &mut global_exec_frame,
         &mut const_prg_memories,
         &mut const_prg_globals,
@@ -2141,6 +2529,7 @@ pub(crate) fn eval_init_expr(
         EXPR_TICK_LIMIT,
         types,
         functions,
+        current_module_owner_id,
         current_module_owner_id,
     )?;
     let (result, _) = result;
@@ -2176,28 +2565,14 @@ impl Display for ExecError {
 
 impl Error for ExecError {}
 
-fn build_function_type_mapping(instance: &Instance) -> Vec<usize> {
-    let mut function_type_mapping = Vec::new();
-
-    // Add imported functions first.
-    for (_, _, import) in &instance.module.imports {
-        if let crate::module::Import::Func(type_idx) = import {
-            function_type_mapping.push(*type_idx as usize);
-        }
-    }
-
-    // Then add local functions.
-    function_type_mapping.extend(instance.module.functions.iter().copied());
-    function_type_mapping
-}
-
-fn execute_module_frame(
+fn execute_module_frame<const TRACK_TICKS: bool>(
     module_id: u32,
     frame: &mut Frame,
     instance: &mut Instance,
     max_ticks: usize,
 ) -> Result<(Continuation, usize), Fault> {
-    let function_type_mapping = build_function_type_mapping(instance);
+    let module_owner_id = instance.owner_id;
+    let function_type_mapping = &instance.function_type_mapping;
     let (memories, globals, tables, element_segments, data_segments, module) = (
         &mut instance.memories,
         &mut instance.globals,
@@ -2206,39 +2581,60 @@ fn execute_module_frame(
         &mut instance.data_segments,
         &instance.module,
     );
-    let mut memory_refs: Vec<&mut dyn Memory> =
-        memories.iter_mut().map(|m| m as &mut dyn Memory).collect();
-
     // Memory instructions are validated at module level, but keep an empty fallback memory so
     // malformed modules trap cleanly instead of panicking.
-    if memory_refs.is_empty() {
-        let mut fallback_memory = crate::VectorMemory::new(0, None);
-        let mut fallback_memories: [&mut dyn Memory; 1] = [&mut fallback_memory];
-        execute(
-            frame,
-            &mut fallback_memories,
-            globals,
-            tables,
-            element_segments,
-            data_segments,
-            max_ticks,
-            &module.types,
-            &function_type_mapping,
-            module_id,
-        )
-    } else {
-        execute(
-            frame,
-            &mut memory_refs,
-            globals,
-            tables,
-            element_segments,
-            data_segments,
-            max_ticks,
-            &module.types,
-            &function_type_mapping,
-            module_id,
-        )
+    match memories.len() {
+        0 => {
+            let mut fallback_memory = crate::VectorMemory::new(0, None);
+            let mut fallback_memories: [&mut dyn Memory; 1] = [&mut fallback_memory];
+            execute::<TRACK_TICKS>(
+                frame,
+                &mut fallback_memories,
+                globals,
+                tables,
+                element_segments,
+                data_segments,
+                max_ticks,
+                &module.types,
+                function_type_mapping,
+                module_id,
+                module_owner_id,
+            )
+        }
+        1 => {
+            let memory = memories.get_mut(0).unwrap();
+            let mut memory_refs: [&mut dyn Memory; 1] = [memory];
+            execute::<TRACK_TICKS>(
+                frame,
+                &mut memory_refs,
+                globals,
+                tables,
+                element_segments,
+                data_segments,
+                max_ticks,
+                &module.types,
+                function_type_mapping,
+                module_id,
+                module_owner_id,
+            )
+        }
+        _ => {
+            let mut memory_refs: Vec<&mut dyn Memory> =
+                memories.iter_mut().map(|m| m as &mut dyn Memory).collect();
+            execute::<TRACK_TICKS>(
+                frame,
+                &mut memory_refs,
+                globals,
+                tables,
+                element_segments,
+                data_segments,
+                max_ticks,
+                &module.types,
+                function_type_mapping,
+                module_id,
+                module_owner_id,
+            )
+        }
     }
 }
 
@@ -2250,6 +2646,8 @@ pub struct ExecutionState {
     module_owner_map: HashMap<u32, u32>,
     /// Global frame stack across all modules
     frame_stack: Vec<(u32, Frame)>, // (module_id, frame)
+    /// Reusable frames for reducing allocation churn during call-heavy execution.
+    recycled_frames: Vec<Frame>,
     /// Final result when all execution completes
     result: Option<Vec<Value>>,
 }
@@ -2259,8 +2657,21 @@ impl ExecutionState {
         ExecutionState {
             modules: HashMap::new(),
             module_owner_map: HashMap::new(),
-            frame_stack: vec![],
+            frame_stack: Vec::with_capacity(256),
+            recycled_frames: Vec::with_capacity(256),
             result: None,
+        }
+    }
+
+    fn recycle_frame(&mut self, frame: Frame) {
+        if self.recycled_frames.len() < FRAME_POOL_LIMIT {
+            self.recycled_frames.push(frame);
+        }
+    }
+
+    fn clear_and_recycle_active_frames(&mut self) {
+        while let Some((_, frame)) = self.frame_stack.pop() {
+            self.recycle_frame(frame);
         }
     }
 
@@ -2353,142 +2764,209 @@ impl ExecutionState {
         funcidx: u32,
         args: &[Value],
     ) -> Result<(), ExecError> {
+        // Allow invoking exported imported functions by creating a trampoline frame.
+        {
+            let instance = self
+                .modules
+                .get(&module_id)
+                .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
+            let num_imported_funcs = instance.num_imported_functions;
+            if funcidx < num_imported_funcs {
+                let type_idx = *instance.function_type_mapping().get(funcidx as usize).ok_or(
+                    ExecError::ExecutionFault(Fault::UnresolvableTypeIndex(funcidx)),
+                )?;
+                let func_type = &instance.module.types[type_idx];
+
+                for (i, (expected, actual)) in func_type.params.iter().zip(args.iter()).enumerate()
+                {
+                    if *expected != actual.type_of() {
+                        return Err(ExecError::LinkageError(LinkError::ArgumentTypeMismatch(
+                            i,
+                            *expected,
+                            actual.type_of(),
+                        )));
+                    }
+                }
+
+                let mut program = crate::decode::Program::new();
+                program.return_types = func_type.results.clone();
+                program.push(Op::Call(funcidx));
+
+                let mut frame = Frame {
+                    locals: vec![],
+                    program: Rc::new(program),
+                    stack: Stack::new(),
+                    pc: 0,
+                    control_stack: vec![],
+                    scratch_values: vec![],
+                };
+                for arg in args {
+                    arg.push_to(&mut frame.stack);
+                }
+                self.frame_stack.push((module_id, frame));
+                return Ok(());
+            }
+        }
+
+        let recycled_frame = self.recycled_frames.pop();
         let instance = self
             .modules
             .get(&module_id)
             .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
-
-        // Allow invoking exported imported functions by creating a trampoline frame.
-        let num_imported_funcs = instance.imported_functions.len() as u32;
-        if funcidx < num_imported_funcs {
-            let function_type_mapping = build_function_type_mapping(instance);
-            let type_idx =
-                *function_type_mapping
-                    .get(funcidx as usize)
-                    .ok_or(ExecError::ExecutionFault(Fault::UnresolvableTypeIndex(
-                        funcidx,
-                    )))?;
-            let func_type = &instance.module.types[type_idx];
-
-            for (i, (expected, actual)) in func_type.params.iter().zip(args.iter()).enumerate() {
-                if *expected != actual.type_of() {
-                    return Err(ExecError::LinkageError(LinkError::ArgumentTypeMismatch(
-                        i,
-                        *expected,
-                        actual.type_of(),
-                    )));
-                }
-            }
-
-            let mut program = crate::decode::Program::new();
-            program.return_types = func_type.results.clone();
-            program.push(Op::Call(funcidx));
-
-            let mut frame = Frame {
-                locals: vec![],
-                return_types: program.return_types.clone(),
-                program,
-                stack: Stack::new(),
-                pc: 0,
-                control_stack: vec![],
-            };
-            for arg in args {
-                arg.push_to(&mut frame.stack);
-            }
-            self.frame_stack.push((module_id, frame));
-            return Ok(());
-        }
-
-        let frame = instance
-            .frame_for_funcidx(funcidx, args)
-            .map_err(ExecError::LinkageError)?;
+        let frame = if let Some(mut frame) = recycled_frame {
+            instance
+                .refill_frame_for_funcidx(funcidx, args, &mut frame)
+                .map_err(ExecError::LinkageError)?;
+            frame
+        } else {
+            instance
+                .frame_for_funcidx(funcidx, args)
+                .map_err(ExecError::LinkageError)?
+        };
 
         self.frame_stack.push((module_id, frame));
         Ok(())
     }
 
-    fn run_with_tick_budget(
+    fn run_core<const BUDGETED: bool>(
         &mut self,
-        mut remaining_ticks: Option<usize>,
+        mut ticks_left: usize,
     ) -> Result<RunResult, ExecError> {
         loop {
             if self.frame_stack.is_empty() {
                 return Ok(RunResult::Complete);
             }
-            if let Some(remaining) = remaining_ticks {
-                if remaining == 0 {
-                    return Ok(RunResult::Paused);
-                }
+            if BUDGETED && ticks_left == 0 {
+                return Ok(RunResult::Paused);
             }
 
             let (current_module_id, _) = self.frame_stack.last().unwrap();
             let current_module_id = *current_module_id;
-            let max_ticks = remaining_ticks
-                .map(|remaining| remaining.saturating_add(1))
-                .unwrap_or(EXEC_TICK_LIMIT);
 
             // Execute current frame
             let result = {
                 let (_, frame) = self.frame_stack.last_mut().unwrap();
                 let module = self.modules.get_mut(&current_module_id).unwrap();
-                execute_module_frame(current_module_id, frame, module, max_ticks)
+                if BUDGETED {
+                    execute_module_frame::<true>(
+                        current_module_id,
+                        frame,
+                        module,
+                        ticks_left.saturating_add(1),
+                    )
+                } else {
+                    execute_module_frame::<false>(current_module_id, frame, module, EXEC_TICK_LIMIT)
+                }
             };
 
-            if let Some(remaining) = remaining_ticks.as_mut() {
-                match result {
-                    Ok((_, ticks_used)) => {
-                        *remaining = remaining.saturating_sub(ticks_used);
-                    }
-                    Err(Fault::OutOfTicks) => {
-                        return Ok(RunResult::Paused);
-                    }
-                    Err(_) => {}
+            let (mut continuation, ticks_used) = match result {
+                Ok((continuation, ticks_used)) => (continuation, ticks_used),
+                Err(Fault::OutOfTicks) if BUDGETED => {
+                    return Ok(RunResult::Paused);
                 }
-            }
+                Err(fault) => {
+                    if let Some((_, frame)) = self.frame_stack.pop() {
+                        self.recycle_frame(frame);
+                    }
+                    return Err(ExecError::ExecutionFault(fault));
+                }
+            };
 
-            let mut continuation = result.map(|(continuation, _)| continuation);
+            if BUDGETED {
+                ticks_left = ticks_left.saturating_sub(ticks_used);
+            }
 
             // Handle continuations in a loop to support recursive calls
             loop {
                 match continuation {
-                    Ok(Continuation::ProgramEnd) | Ok(Continuation::DoneReturn) => {
+                    Continuation::ProgramEnd | Continuation::DoneReturn => {
                         // Handle function return
-                        let (_, completed_frame) = self.frame_stack.pop().unwrap();
-
-                        // Collect return values
-                        let mut return_values = vec![
-                            (ValueType::Unit, Value::Unit);
-                            completed_frame.return_types.len()
-                        ];
-                        let mut temp_stack = completed_frame.stack;
-                        for (i, rt) in completed_frame.return_types.iter().enumerate().rev() {
-                            let value = Value::pop_from(*rt, &mut temp_stack)
-                                .map_err(ExecError::ExecutionFault)?;
-                            return_values[i] = (*rt, value);
-                        }
+                        let (_, mut completed_frame) = self.frame_stack.pop().unwrap();
+                        let return_types = &completed_frame.program.return_types;
+                        completed_frame.scratch_values.clear();
 
                         if let Some((_, caller_frame)) = self.frame_stack.last_mut() {
-                            // Push return values to caller's stack
-                            for (_, v) in return_values {
-                                v.push_to(&mut caller_frame.stack);
+                            match return_types.as_slice() {
+                                [] => {}
+                                [rt] => {
+                                    let value = Value::pop_from(*rt, &mut completed_frame.stack)
+                                        .map_err(ExecError::ExecutionFault)?;
+                                    value.push_to(&mut caller_frame.stack);
+                                }
+                                _ => {
+                                    completed_frame
+                                        .scratch_values
+                                        .resize(return_types.len(), Value::Unit);
+                                    for (i, rt) in return_types.iter().enumerate().rev() {
+                                        completed_frame.scratch_values[i] =
+                                            Value::pop_from(*rt, &mut completed_frame.stack)
+                                                .map_err(ExecError::ExecutionFault)?;
+                                    }
+                                    for value in &completed_frame.scratch_values {
+                                        value.push_to(&mut caller_frame.stack);
+                                    }
+                                }
                             }
                         } else {
                             // No caller, this is the final result
-                            self.result = Some(return_values.into_iter().map(|(_, v)| v).collect());
+                            let final_values = self.result.get_or_insert_with(Vec::new);
+                            final_values.clear();
+                            match return_types.as_slice() {
+                                [] => {}
+                                [rt] => {
+                                    final_values.push(
+                                        Value::pop_from(*rt, &mut completed_frame.stack)
+                                            .map_err(ExecError::ExecutionFault)?,
+                                    );
+                                }
+                                _ => {
+                                    completed_frame
+                                        .scratch_values
+                                        .resize(return_types.len(), Value::Unit);
+                                    for (i, rt) in return_types.iter().enumerate().rev() {
+                                        completed_frame.scratch_values[i] =
+                                            Value::pop_from(*rt, &mut completed_frame.stack)
+                                                .map_err(ExecError::ExecutionFault)?;
+                                    }
+                                    final_values.extend_from_slice(&completed_frame.scratch_values);
+                                }
+                            }
+                            self.recycle_frame(completed_frame);
                             return Ok(RunResult::Complete);
                         }
+                        self.recycle_frame(completed_frame);
                         break; // Exit continuation loop to continue main execution loop
                     }
-                    Ok(Continuation::Call(funcidx)) => {
+                    Continuation::Call(funcidx) => {
                         // Function call - check if it's imported or local
+                        let recycled_frame = self.recycled_frames.pop();
                         let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                         let module = self.modules.get(&current_module_id).unwrap();
 
-                        // Check if this is an imported function
-                        let num_imported_funcs = module.imported_functions.len() as u32;
-                        if funcidx < num_imported_funcs {
+                        if module.num_imported_functions == 0 {
+                            // Common hot path: module has no imports, so all calls are local.
+                            let frame = if let Some(mut frame) = recycled_frame {
+                                module
+                                    .refill_frame_for_funcidx_from_stack(
+                                        funcidx,
+                                        &mut current_frame.stack,
+                                        &mut frame,
+                                    )
+                                    .map_err(ExecError::ExecutionFault)?;
+                                frame
+                            } else {
+                                module
+                                    .frame_for_funcidx_from_stack(funcidx, &mut current_frame.stack)
+                                    .map_err(ExecError::ExecutionFault)?
+                            };
+                            self.frame_stack.push((current_module_id, frame));
+                            break;
+                        } else if funcidx < module.num_imported_functions {
                             // This is an imported function - dispatch via continuation
-                            let imported_func = &module.imported_functions[funcidx as usize];
+                            let imported_func = module
+                                .imported_functions
+                                .get(funcidx as usize)
+                                .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
                             match imported_func {
                                 ImportedFunction::Host(host_func) => {
                                     // Call host function directly
@@ -2502,7 +2980,7 @@ impl ExecutionState {
                                         }
                                         other => {
                                             // Host function returned another continuation - handle it recursively
-                                            continuation = Ok(other);
+                                            continuation = other;
                                             continue;
                                         }
                                     }
@@ -2512,51 +2990,45 @@ impl ExecutionState {
                                     func_idx,
                                 } => {
                                     // Inter-module call
-                                    continuation = Ok(Continuation::CallExternal {
+                                    continuation = Continuation::CallExternal {
                                         module_id: *module_id,
                                         func_id: *func_idx,
                                         expected_type: None,
-                                    });
+                                    };
                                     continue;
                                 }
                             }
                         } else {
                             // Local function call
-                            let local_func_idx = funcidx - num_imported_funcs;
-                            let func_index = local_func_idx as usize;
-                            if func_index >= module.module.functions.len() {
-                                return Err(ExecError::ExecutionFault(
-                                    Fault::GlobalIndexOutOfBounds,
-                                ));
-                            }
-
-                            let type_idx = module.module.functions[func_index];
-                            let func_type = &module.module.types[type_idx];
-
-                            let mut args = vec![Value::Unit; func_type.params.len()];
-                            for (i, param_type) in func_type.params.iter().enumerate().rev() {
-                                let value = Value::pop_from(*param_type, &mut current_frame.stack)
-                                    .map_err(ExecError::ExecutionFault)?;
-                                args[i] = value;
-                            }
-
                             // Create new frame for the called function
-                            let frame = module
-                                .frame_for_funcidx(funcidx, &args)
-                                .map_err(ExecError::LinkageError)?;
+                            let frame = if let Some(mut frame) = recycled_frame {
+                                module
+                                    .refill_frame_for_funcidx_from_stack(
+                                        funcidx,
+                                        &mut current_frame.stack,
+                                        &mut frame,
+                                    )
+                                    .map_err(ExecError::ExecutionFault)?;
+                                frame
+                            } else {
+                                module
+                                    .frame_for_funcidx_from_stack(funcidx, &mut current_frame.stack)
+                                    .map_err(ExecError::ExecutionFault)?
+                            };
                             self.frame_stack.push((current_module_id, frame));
                             break; // Exit continuation loop to continue main execution loop
                         }
                     }
-                    Ok(Continuation::CallExternal {
+                    Continuation::CallExternal {
                         module_id,
                         func_id,
                         expected_type,
-                    }) => {
+                    } => {
                         // Inter-module call
                         let target_module_key = self
                             .ensure_runtime_module_available(module_id)
                             .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
+                        let recycled_frame = self.recycled_frames.pop();
                         let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                         let target_module = self
                             .modules
@@ -2564,13 +3036,12 @@ impl ExecutionState {
                             .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
 
                         // Get function signature from the target module.
-                        let function_type_mapping = build_function_type_mapping(target_module);
                         let func_index = func_id as usize;
-                        if func_index >= function_type_mapping.len() {
+                        if func_index >= target_module.function_type_mapping().len() {
                             return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
                         }
 
-                        let type_idx = function_type_mapping[func_index];
+                        let type_idx = target_module.function_type_mapping()[func_index];
                         let func_type = &target_module.module.types[type_idx];
 
                         if let Some((source_module_id, expected_type_idx)) = expected_type {
@@ -2595,8 +3066,11 @@ impl ExecutionState {
                         }
 
                         // If the target is imported, dispatch recursively without creating a frame.
-                        if func_id < target_module.imported_functions.len() as u32 {
-                            let imported_func = &target_module.imported_functions[func_id as usize];
+                        if func_id < target_module.num_imported_functions {
+                            let imported_func =
+                                target_module.imported_functions.get(func_id as usize).ok_or(
+                                    ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds),
+                                )?;
                             match imported_func {
                                 ImportedFunction::Host(host_func) => {
                                     let result = host_func(&mut current_frame.stack)
@@ -2604,7 +3078,7 @@ impl ExecutionState {
                                     match result {
                                         Continuation::ProgramEnd => break,
                                         other => {
-                                            continuation = Ok(other);
+                                            continuation = other;
                                             continue;
                                         }
                                     }
@@ -2613,30 +3087,35 @@ impl ExecutionState {
                                     module_id,
                                     func_idx,
                                 } => {
-                                    continuation = Ok(Continuation::CallExternal {
+                                    continuation = Continuation::CallExternal {
                                         module_id: *module_id,
                                         func_id: *func_idx,
                                         expected_type: None,
-                                    });
+                                    };
                                     continue;
                                 }
                             }
                         } else {
                             // Create new frame in target module.
-                            let mut args = vec![Value::Unit; func_type.params.len()];
-                            for (i, param_type) in func_type.params.iter().enumerate().rev() {
-                                let value = Value::pop_from(*param_type, &mut current_frame.stack)
+                            let frame = if let Some(mut frame) = recycled_frame {
+                                target_module
+                                    .refill_frame_for_funcidx_from_stack(
+                                        func_id,
+                                        &mut current_frame.stack,
+                                        &mut frame,
+                                    )
                                     .map_err(ExecError::ExecutionFault)?;
-                                args[i] = value;
-                            }
-                            let frame = target_module
-                                .frame_for_funcidx(func_id, &args)
-                                .map_err(ExecError::LinkageError)?;
+                                frame
+                            } else {
+                                target_module
+                                    .frame_for_funcidx_from_stack(func_id, &mut current_frame.stack)
+                                    .map_err(ExecError::ExecutionFault)?
+                            };
                             self.frame_stack.push((target_module_key, frame));
                             break; // Exit continuation loop to continue main execution loop
                         }
                     }
-                    Ok(Continuation::CallHost(host_func)) => {
+                    Continuation::CallHost(host_func) => {
                         // Handle host function call
                         let (_, current_frame) = self.frame_stack.last_mut().unwrap();
 
@@ -2652,18 +3131,20 @@ impl ExecutionState {
                             }
                             other => {
                                 // Host function returned a different continuation - handle recursively
-                                continuation = Ok(other);
+                                continuation = other;
                                 continue;
                             }
                         }
                     }
-                    Err(fault) => {
-                        // Clean up current frame on fault
-                        self.frame_stack.pop();
-                        return Err(ExecError::ExecutionFault(fault));
-                    }
                 }
             }
+        }
+    }
+
+    fn run_with_tick_budget(&mut self, remaining_ticks: Option<usize>) -> Result<RunResult, ExecError> {
+        match remaining_ticks {
+            Some(ticks) => self.run_core::<true>(ticks),
+            None => self.run_core::<false>(0),
         }
     }
 
@@ -2671,7 +3152,7 @@ impl ExecutionState {
     pub fn run(&mut self) -> Result<(), ExecError> {
         let run_result = self.run_with_tick_budget(None);
         if run_result.is_err() {
-            self.frame_stack.clear();
+            self.clear_and_recycle_active_frames();
         }
         match run_result? {
             RunResult::Complete => Ok(()),
@@ -2683,7 +3164,7 @@ impl ExecutionState {
     pub fn run_for_ticks(&mut self, ticks: usize) -> Result<RunResult, ExecError> {
         let run_result = self.run_with_tick_budget(Some(ticks));
         if run_result.is_err() {
-            self.frame_stack.clear();
+            self.clear_and_recycle_active_frames();
         }
         run_result
     }

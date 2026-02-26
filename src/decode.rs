@@ -21,6 +21,12 @@ use std::fmt::{Debug, Display, Formatter};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub ops: Vec<Op>,
+    /// Jump targets for structured `if`/`else` dispatch.
+    /// For `Op::If`, target is first op of else-body, or matching `EndScope(IfElse)` when no else.
+    /// For `Op::Else`, target is matching `EndScope(IfElse)`.
+    pub if_else_jumps: Vec<usize>,
+    /// For each `StartScope` op pc, the matching `EndScope` pc.
+    pub scope_end_jumps: Vec<usize>,
     pub local_types: Vec<ValueType>,
     pub return_types: Vec<ValueType>,
 }
@@ -158,6 +164,8 @@ impl Program {
     pub fn new() -> Self {
         Program {
             ops: vec![],
+            if_else_jumps: vec![],
+            scope_end_jumps: vec![],
             local_types: vec![],
             return_types: vec![],
         }
@@ -987,7 +995,190 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
         return Err(DecodeError::FailedToDecode("unexpected end".to_string()));
     }
 
+    prg.ops = peephole_optimize_ops(&prg.ops);
+    prg.if_else_jumps = compute_if_else_jumps(&prg.ops);
+    prg.scope_end_jumps = compute_scope_end_jumps(&prg.ops);
     Ok(prg)
+}
+
+fn peephole_optimize_ops(ops: &[Op]) -> Vec<Op> {
+    let mut optimized = Vec::with_capacity(ops.len());
+    let mut i = 0;
+
+    while i < ops.len() {
+        if i + 4 <= ops.len() {
+            if let [
+                Op::GetLocal(lhs),
+                Op::GetLocal(rhs),
+                Op::I32GeU,
+                Op::BrIf(depth),
+            ] = &ops[i..i + 4]
+            {
+                optimized.push(Op::BrIfLocalI32GeU(*lhs, *rhs, *depth));
+                i += 4;
+                continue;
+            }
+        }
+
+        if i + 3 <= ops.len() {
+            if let [Op::GetLocal(src), Op::I64Eqz, Op::BrIf(depth)] = &ops[i..i + 3] {
+                optimized.push(Op::BrIfLocalI64Eqz(*src, *depth));
+                i += 3;
+                continue;
+            }
+        }
+
+        if i + 4 <= ops.len() {
+            if let [
+                Op::GetLocal(a),
+                Op::GetLocal(b),
+                Op::I64Add,
+                Op::SetLocal(dst),
+            ] = &ops[i..i + 4]
+            {
+                optimized.push(Op::I64LocalAddSet(*a, *b, *dst));
+                i += 4;
+                continue;
+            }
+        }
+
+        if i + 4 <= ops.len() {
+            if let [
+                Op::GetLocal(src),
+                Op::I64Const(c),
+                Op::I64Sub,
+                Op::SetLocal(dst),
+            ] = &ops[i..i + 4]
+            {
+                optimized.push(Op::I64LocalSubConstSet(*src, *c, *dst));
+                i += 4;
+                continue;
+            }
+        }
+
+        if i + 6 <= ops.len() {
+            if let [
+                Op::GetLocal(src),
+                Op::I32Const(mul),
+                Op::I32Mul,
+                Op::I32Const(add),
+                Op::I32Add,
+                Op::SetLocal(dst),
+            ] = &ops[i..i + 6]
+            {
+                optimized.push(Op::I32LocalMulAddConstSet(*src, *mul, *add, *dst));
+                i += 6;
+                continue;
+            }
+        }
+
+        if i + 5 <= ops.len() {
+            if let [
+                Op::GetLocal(src),
+                Op::I32Const(mul),
+                Op::I32Mul,
+                Op::I32Const(add),
+                Op::I32Add,
+            ] = &ops[i..i + 5]
+            {
+                optimized.push(Op::I32LocalMulAddConst(*src, *mul, *add));
+                i += 5;
+                continue;
+            }
+        }
+
+        if i + 4 <= ops.len() {
+            if let [
+                Op::GetLocal(src),
+                Op::I32Const(add),
+                Op::I32Add,
+                Op::SetLocal(dst),
+            ] = &ops[i..i + 4]
+            {
+                optimized.push(Op::I32LocalAddConstSet(*src, *add, *dst));
+                i += 4;
+                continue;
+            }
+        }
+
+        optimized.push(ops[i].clone());
+        i += 1;
+    }
+
+    optimized
+}
+
+fn compute_if_else_jumps(ops: &[Op]) -> Vec<usize> {
+    #[derive(Clone, Copy)]
+    struct ScopeEntry {
+        scope_type: ScopeType,
+        if_pc: Option<usize>,
+        else_pc: Option<usize>,
+    }
+
+    let mut jumps = vec![usize::MAX; ops.len()];
+    let mut scope_stack: Vec<ScopeEntry> = Vec::new();
+
+    for (pc, op) in ops.iter().enumerate() {
+        match op {
+            Op::StartScope(_, scope_type) => scope_stack.push(ScopeEntry {
+                scope_type: *scope_type,
+                if_pc: None,
+                else_pc: None,
+            }),
+            Op::If => {
+                if let Some(top) = scope_stack.last_mut() {
+                    if top.scope_type == ScopeType::IfElse {
+                        top.if_pc = Some(pc);
+                    }
+                }
+            }
+            Op::Else => {
+                if let Some(top) = scope_stack.last_mut() {
+                    if top.scope_type == ScopeType::IfElse {
+                        if let Some(if_pc) = top.if_pc {
+                            jumps[if_pc] = pc.saturating_add(1);
+                        }
+                        top.else_pc = Some(pc);
+                    }
+                }
+            }
+            Op::EndScope(scope_type) => {
+                if let Some(scope) = scope_stack.pop() {
+                    debug_assert_eq!(scope.scope_type, *scope_type);
+                    if *scope_type == ScopeType::IfElse {
+                        if let Some(else_pc) = scope.else_pc {
+                            jumps[else_pc] = pc;
+                        } else if let Some(if_pc) = scope.if_pc {
+                            jumps[if_pc] = pc;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    jumps
+}
+
+fn compute_scope_end_jumps(ops: &[Op]) -> Vec<usize> {
+    let mut jumps = vec![usize::MAX; ops.len()];
+    let mut scope_stack: Vec<usize> = Vec::new();
+
+    for (pc, op) in ops.iter().enumerate() {
+        match op {
+            Op::StartScope(_, _) => scope_stack.push(pc),
+            Op::EndScope(_) => {
+                if let Some(start_pc) = scope_stack.pop() {
+                    jumps[start_pc] = pc;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    jumps
 }
 
 /// Scan instructions but don't decode. Used for loading expressions in modules.

@@ -28,47 +28,57 @@ impl Default for Stack {
 }
 
 impl Stack {
+    #[inline(always)]
     pub fn new() -> Self {
         Stack { data: vec![] }
     }
 
+    #[inline(always)]
     pub fn width(&self) -> usize {
         self.data.len()
     }
 
+    #[inline(always)]
     pub fn shrink_to(&mut self, width: usize) {
         self.data.truncate(width);
     }
 }
 impl Stack {
+    #[inline(always)]
     pub fn push_i32(&mut self, value: i32) {
         let value = value as i64;
         self.data.push(value as u64);
     }
 
+    #[inline(always)]
     pub fn push_i64(&mut self, value: i64) {
         self.data.push(value as u64);
     }
 
+    #[inline(always)]
     pub fn push_u32(&mut self, value: u32) {
         let value = value as u64;
         self.data.push(value);
     }
 
+    #[inline(always)]
     pub fn push_u64(&mut self, value: u64) {
         self.data.push(value);
     }
 
+    #[inline(always)]
     pub fn push_f32(&mut self, value: f32) {
         let bits = value.to_bits();
         let value = bits as u64;
         self.data.push(value);
     }
 
+    #[inline(always)]
     pub fn push_f64(&mut self, value: f64) {
         self.data.push(value.to_bits());
     }
 
+    #[inline(always)]
     pub fn top_i32(&self) -> Result<i32, Fault> {
         self.data
             .last()
@@ -77,6 +87,7 @@ impl Stack {
             .map(|v| v as u32 as i32)
     }
 
+    #[inline(always)]
     pub fn pop_i32(&mut self) -> Result<i32, Fault> {
         self.data
             .pop()
@@ -84,6 +95,7 @@ impl Stack {
             .map(|v| v as u32 as i32)
     }
 
+    #[inline(always)]
     pub fn pop_i64(&mut self) -> Result<i64, Fault> {
         self.data
             .pop()
@@ -91,6 +103,7 @@ impl Stack {
             .map(|v| v as i64)
     }
 
+    #[inline(always)]
     pub fn top_f32(&self) -> Result<f32, Fault> {
         self.data
             .last()
@@ -99,6 +112,7 @@ impl Stack {
             .map(|v| f32::from_bits(v as u32))
     }
 
+    #[inline(always)]
     pub fn pop_u32(&mut self) -> Result<u32, Fault> {
         self.data
             .pop()
@@ -106,6 +120,7 @@ impl Stack {
             .map(|v| v as u32)
     }
 
+    #[inline(always)]
     pub fn top_f64(&self) -> Result<f64, Fault> {
         self.data
             .last()
@@ -114,6 +129,7 @@ impl Stack {
             .map(f64::from_bits)
     }
 
+    #[inline(always)]
     pub fn top_u32(&self) -> Result<u32, Fault> {
         self.data
             .last()
@@ -122,10 +138,12 @@ impl Stack {
             .map(|v| v as u32)
     }
 
+    #[inline(always)]
     pub fn pop_u64(&mut self) -> Result<u64, Fault> {
         self.data.pop().ok_or(Fault::StackUnderflow)
     }
 
+    #[inline(always)]
     pub fn pop_f32(&mut self) -> Result<f32, Fault> {
         self.data
             .pop()
@@ -133,6 +151,7 @@ impl Stack {
             .map(|v| f32::from_bits(v as u32))
     }
 
+    #[inline(always)]
     pub fn top_i64(&self) -> Result<i64, Fault> {
         self.data
             .last()
@@ -140,6 +159,7 @@ impl Stack {
             .ok_or(Fault::StackUnderflow)
             .map(|v| v as i64)
     }
+    #[inline(always)]
     pub fn pop_f64(&mut self) -> Result<f64, Fault> {
         self.data
             .pop()
@@ -147,6 +167,7 @@ impl Stack {
             .map(f64::from_bits)
     }
 
+    #[inline(always)]
     pub fn push_ref(&mut self, value: Option<u64>) {
         // Use u64::MAX to represent None, otherwise store the raw reference payload.
         let encoded = match value {
@@ -156,6 +177,7 @@ impl Stack {
         self.data.push(encoded);
     }
 
+    #[inline(always)]
     pub fn pop_ref(&mut self) -> Result<Option<u64>, Fault> {
         let raw = self.data.pop().ok_or(Fault::StackUnderflow)?;
         if raw == u64::MAX {
@@ -171,6 +193,7 @@ impl Stack {
         Ok(Value::I32(raw as i32))
     }
 
+    #[inline(always)]
     pub fn top_u64(&self) -> Result<u64, Fault> {
         self.data.last().cloned().ok_or(Fault::StackUnderflow)
     }
