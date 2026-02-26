@@ -39,7 +39,9 @@ fn read_limits(reader: &mut LEB128Reader) -> Result<(u32, Option<u32>), DecodeEr
     // "Limits are encoded with a preceding flag indicating whether a maximum is present."
     let has_maximum = reader.load_imm_u8()?;
     if (has_maximum & 0x80) != 0 {
-        return Err(MalformedMemory("integer representation too long".to_string()));
+        return Err(MalformedMemory(
+            "integer representation too long".to_string(),
+        ));
     }
     if has_maximum > 1 {
         return Err(MalformedMemory("integer too large".to_string()));
@@ -131,7 +133,9 @@ fn read_table(reader: &mut LEB128Reader) -> Result<Table, LoaderError> {
     let (ty_lead, has_init_expr) = if first == 0x40 {
         let second = reader.load_imm_u8().map_err(DecoderError)?;
         if second != 0x00 {
-            return Err(DecoderError(FailedToDecode("invalid table encoding".to_string())));
+            return Err(DecoderError(FailedToDecode(
+                "invalid table encoding".to_string(),
+            )));
         }
         (reader.load_imm_u8().map_err(DecoderError)?, true)
     } else {
@@ -608,11 +612,12 @@ impl Module {
                     let _name = reader.load_string().map_err(DecoderError)?;
 
                     // Skip the rest of the custom section content
-                    let remaining = section_end.checked_sub(reader.position()).ok_or(
-                        DecoderError(FailedToDecode(
-                            "Custom section length underflow".to_string(),
-                        )),
-                    )?;
+                    let remaining =
+                        section_end
+                            .checked_sub(reader.position())
+                            .ok_or(DecoderError(FailedToDecode(
+                                "Custom section length underflow".to_string(),
+                            )))?;
                     reader.advance(remaining);
                 }
                 SectionType::DataCount => {

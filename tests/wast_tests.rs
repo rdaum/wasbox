@@ -13,9 +13,9 @@
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::HashMap;
     use std::collections::HashSet;
-    use std::cell::RefCell;
     use std::fmt::{Debug, Formatter};
     use std::path::Path;
     use std::rc::Rc;
@@ -558,7 +558,8 @@ mod tests {
                                     if let TestModule::Loaded(ref mut exec_state) = execution {
                                         // Add module to existing execution state
                                         exec_state.add_module(new_module_id, i);
-                                        if let Some(instance) = exec_state.get_module(new_module_id) {
+                                        if let Some(instance) = exec_state.get_module(new_module_id)
+                                        {
                                             registry.cache_module(new_module_id, instance);
                                         }
                                         current_module_id = new_module_id;
@@ -567,7 +568,8 @@ mod tests {
                                         // Create new execution state for first module
                                         let mut exec_state = ExecutionState::new();
                                         exec_state.add_module(new_module_id, i);
-                                        if let Some(instance) = exec_state.get_module(new_module_id) {
+                                        if let Some(instance) = exec_state.get_module(new_module_id)
+                                        {
                                             registry.cache_module(new_module_id, instance);
                                         }
                                         current_module_id = new_module_id;
@@ -620,7 +622,8 @@ mod tests {
                         registry.refresh_from_execution(execution);
                         let result = execution.result().unwrap();
 
-                        for (i, (expected, actual)) in results.iter().zip(result.iter()).enumerate() {
+                        for (i, (expected, actual)) in results.iter().zip(result.iter()).enumerate()
+                        {
                             assert!(
                                 ret_matches(expected, actual),
                                 "Invoke: {name}: Mismatch at index {i}: expected {expected:?}, got {actual:?} for directive #{directive_num} @ {linecol:?}"
@@ -648,10 +651,13 @@ mod tests {
                             .get(global_idx as usize)
                             .unwrap_or_else(|| panic!("Global index out of bounds: {global_idx}"))
                             .value;
-                        let actual = if let Some((module_name, field_name)) = global.split_once('.') {
-                            if let Some(source_module_id) = registry.resolve_registered_module(module_name)
+                        let actual = if let Some((module_name, field_name)) = global.split_once('.')
+                        {
+                            if let Some(source_module_id) =
+                                registry.resolve_registered_module(module_name)
                             {
-                                if let Some(source_instance) = execution.get_module(source_module_id)
+                                if let Some(source_instance) =
+                                    execution.get_module(source_module_id)
                                 {
                                     if let Some(source_global_idx) =
                                         source_instance.find_globalidx(field_name)
@@ -725,8 +731,7 @@ mod tests {
                     let TestModule::Loaded(ref mut execution) = execution else {
                         panic!("Expected a loaded module for invocation @ {linecol:?}");
                     };
-                    let target_module_id =
-                        resolve_module_id(module, current_module_id, &registry);
+                    let target_module_id = resolve_module_id(module, current_module_id, &registry);
                     let funcidx = execution
                         .get_module(target_module_id)
                         .unwrap()
@@ -905,9 +910,19 @@ mod tests {
     wast_test!(exports_test, "exports.wast");
     wast_test!(exports0_test, "exports0.wast");
     wast_test!(imports_test, "imports.wast");
+    wast_test!(imports0_test, "imports0.wast");
+    wast_test!(imports1_test, "imports1.wast");
+    wast_test!(imports2_test, "imports2.wast");
+    wast_test!(imports3_test, "imports3.wast");
+    wast_test!(imports4_test, "imports4.wast");
     wast_test!(start_test, "start.wast");
+    wast_test!(start0_test, "start0.wast");
     wast_test!(func_test, "func.wast");
     wast_test!(linking_test, "linking.wast");
+    wast_test!(linking0_test, "linking0.wast");
+    wast_test!(linking1_test, "linking1.wast");
+    wast_test!(linking2_test, "linking2.wast");
+    wast_test!(linking3_test, "linking3.wast");
     wast_test!(custom_test, "custom.wast");
     wast_test!(endianness_test, "endianness.wast");
     wast_test!(int_literals_test, "int_literals.wast");
@@ -918,6 +933,13 @@ mod tests {
     wast_test!(float_exprs1_test, "float_exprs1.wast");
     wast_test!(labels_test, "labels.wast");
     wast_test!(left_to_right_test, "left-to-right.wast");
+    wast_test!(table_get_test, "table_get.wast");
+    wast_test!(table_set_test, "table_set.wast");
+    wast_test!(table_size_test, "table_size.wast");
+    wast_test!(table_grow_test, "table_grow.wast");
+    wast_test!(table_fill_test, "table_fill.wast");
+    wast_test!(table_copy_test, "table_copy.wast");
+    wast_test!(table_init_test, "table_init.wast");
 
     #[test]
     fn test_minimal_import() {

@@ -17,8 +17,8 @@ use crate::import::{HostFunction, ImportResolver, ImportedFunction};
 use crate::instance::{LinkError, TableInstance, WASM_PAGE_SIZE};
 use crate::memory::Memory;
 use crate::memory::SliceMemory;
-use crate::module::Global;
 use crate::module::Module;
+use crate::module::{Global, ReferenceType};
 use crate::op::{MemArg, Op};
 use crate::stack::Stack;
 use crate::{FuncType, Instance, Type, TypeSignature, ValueType};
@@ -410,17 +410,40 @@ fn execute_branch(frame: &mut Frame, depth: usize) -> Result<(), Fault> {
     Ok(())
 }
 
+fn pop_table_value(stack: &mut Stack, ref_type: ReferenceType) -> Result<Value, Fault> {
+    match ref_type {
+        ReferenceType::FuncRef => {
+            let ref_val = stack.pop_ref()?;
+            Ok(Value::FuncRef(ref_val.map(decode_func_ref)))
+        }
+        ReferenceType::ExternRef => {
+            let ref_val = stack.pop_ref()?;
+            Ok(Value::ExternRef(ref_val.map(|v| v as u32)))
+        }
+    }
+}
+
+fn validate_range(start: u32, len: u32, total_len: usize) -> Result<(usize, usize), Fault> {
+    let start = start as usize;
+    let len = len as usize;
+    let end = start.checked_add(len).ok_or(Fault::MemoryOutOfBounds)?;
+    if end > total_len {
+        return Err(Fault::MemoryOutOfBounds);
+    }
+    Ok((start, end))
+}
+
 fn execute(
     frame: &mut Frame,
     memories: &mut [&mut dyn Memory],
     globals: &mut [GlobalVar],
     tables: &mut [TableInstance],
+    element_segments: &mut [Option<Vec<Value>>],
     max_ticks: usize,
     types: &[FuncType],
     functions: &[usize],
     current_module_id: u32,
-) -> Result<(Continuation, usize), Fault>
-{
+) -> Result<(Continuation, usize), Fault> {
     let mut ticks_used = 0;
     loop {
         // Pull next opcode from the program
@@ -585,7 +608,7 @@ fn execute(
                         }
                     }
                     Some(Value::FuncRef(None)) => Err(Fault::UninitializedElement), // Null function reference
-                    _ => Err(Fault::UndefinedElement),                               // Invalid table element
+                    _ => Err(Fault::UndefinedElement), // Invalid table element
                 };
             }
             Op::Drop => {
@@ -645,19 +668,7 @@ fn execute(
                     return Err(Fault::GlobalIndexOutOfBounds);
                 }
                 let table = &mut tables[table_idx as usize];
-
-                // Pop the appropriate type of value based on the table's reference type
-                let value = match table.ref_type {
-                    crate::module::ReferenceType::FuncRef => {
-                        let ref_val = frame.stack.pop_ref()?;
-                        let ref_val = ref_val.map(decode_func_ref);
-                        Value::FuncRef(ref_val)
-                    }
-                    crate::module::ReferenceType::ExternRef => {
-                        let ref_val = frame.stack.pop_ref()?;
-                        Value::ExternRef(ref_val.map(|v| v as u32))
-                    }
-                };
+                let value = pop_table_value(&mut frame.stack, table.ref_type)?;
 
                 let idx = frame.stack.pop_u32()?;
                 let mut table_elements = table.elements.borrow_mut();
@@ -666,13 +677,110 @@ fn execute(
                 }
                 table_elements[idx as usize] = Some(value);
             }
-            Op::TableInit(_table_idx, _elem_idx) => {
-                // Bulk-memory table.init is not fully implemented yet.
-                // Trap so assert_trap-based tests continue to validate runtime behavior.
-                return Err(Fault::MemoryOutOfBounds);
+            Op::TableInit(table_idx, elem_idx) => {
+                let len = frame.stack.pop_u32()?;
+                let src = frame.stack.pop_u32()?;
+                let dst = frame.stack.pop_u32()?;
+
+                let table = tables
+                    .get_mut(table_idx as usize)
+                    .ok_or(Fault::GlobalIndexOutOfBounds)?;
+                let segment = element_segments
+                    .get(elem_idx as usize)
+                    .ok_or(Fault::GlobalIndexOutOfBounds)?;
+                let segment_values = segment.as_deref().unwrap_or(&[]);
+
+                let (src_start, src_end) = validate_range(src, len, segment_values.len())?;
+                let mut table_elements = table.elements.borrow_mut();
+                let (dst_start, _) = validate_range(dst, len, table_elements.len())?;
+                for (i, value) in segment_values[src_start..src_end].iter().enumerate() {
+                    table_elements[dst_start + i] = Some(*value);
+                }
             }
-            Op::ElemDrop(_elem_idx) => {
-                // No-op until element segment stores are modeled explicitly.
+            Op::ElemDrop(elem_idx) => {
+                let segment = element_segments
+                    .get_mut(elem_idx as usize)
+                    .ok_or(Fault::GlobalIndexOutOfBounds)?;
+                *segment = None;
+            }
+            Op::TableCopy(dst_table_idx, src_table_idx) => {
+                let len = frame.stack.pop_u32()?;
+                let src = frame.stack.pop_u32()?;
+                let dst = frame.stack.pop_u32()?;
+
+                let src_table_idx = src_table_idx as usize;
+                let dst_table_idx = dst_table_idx as usize;
+                if src_table_idx >= tables.len() || dst_table_idx >= tables.len() {
+                    return Err(Fault::GlobalIndexOutOfBounds);
+                }
+
+                if tables[src_table_idx].ref_type != tables[dst_table_idx].ref_type {
+                    return Err(Fault::InvalidRefType);
+                }
+
+                if src_table_idx == dst_table_idx {
+                    let mut table_elements = tables[src_table_idx].elements.borrow_mut();
+                    let (src_start, src_end) = validate_range(src, len, table_elements.len())?;
+                    let (dst_start, _) = validate_range(dst, len, table_elements.len())?;
+                    let copied = table_elements[src_start..src_end].to_vec();
+                    for (i, value) in copied.into_iter().enumerate() {
+                        table_elements[dst_start + i] = value;
+                    }
+                } else {
+                    let copied = {
+                        let src_elements = tables[src_table_idx].elements.borrow();
+                        let (src_start, src_end) = validate_range(src, len, src_elements.len())?;
+                        src_elements[src_start..src_end].to_vec()
+                    };
+                    let mut dst_elements = tables[dst_table_idx].elements.borrow_mut();
+                    let (dst_start, _) = validate_range(dst, len, dst_elements.len())?;
+                    for (i, value) in copied.into_iter().enumerate() {
+                        dst_elements[dst_start + i] = value;
+                    }
+                }
+            }
+            Op::TableGrow(table_idx) => {
+                let delta = frame.stack.pop_u32()?;
+                let table = tables
+                    .get_mut(table_idx as usize)
+                    .ok_or(Fault::GlobalIndexOutOfBounds)?;
+                let fill_value = pop_table_value(&mut frame.stack, table.ref_type)?;
+
+                let mut table_elements = table.elements.borrow_mut();
+                let old_len = table_elements.len();
+                let Some(new_len) = old_len.checked_add(delta as usize) else {
+                    frame.stack.push_i32(-1);
+                    continue;
+                };
+                let exceeds_limit = new_len > u32::MAX as usize
+                    || table.limits.1.is_some_and(|max| new_len > max as usize);
+                if exceeds_limit {
+                    frame.stack.push_i32(-1);
+                    continue;
+                }
+                table_elements.resize(new_len, Some(fill_value));
+                frame.stack.push_u32(old_len as u32);
+            }
+            Op::TableSize(table_idx) => {
+                let table = tables
+                    .get(table_idx as usize)
+                    .ok_or(Fault::GlobalIndexOutOfBounds)?;
+                let table_len = table.elements.borrow().len();
+                frame.stack.push_u32(table_len as u32);
+            }
+            Op::TableFill(table_idx) => {
+                let len = frame.stack.pop_u32()?;
+                let table = tables
+                    .get_mut(table_idx as usize)
+                    .ok_or(Fault::GlobalIndexOutOfBounds)?;
+                let value = pop_table_value(&mut frame.stack, table.ref_type)?;
+                let dst = frame.stack.pop_u32()?;
+
+                let mut table_elements = table.elements.borrow_mut();
+                let (dst_start, dst_end) = validate_range(dst, len, table_elements.len())?;
+                for slot in &mut table_elements[dst_start..dst_end] {
+                    *slot = Some(value);
+                }
             }
             Op::LoadI32(addr) => {
                 let memarg = addr;
@@ -1910,9 +2018,9 @@ pub(crate) fn eval_init_expr(
     current_module_owner_id: u32,
 ) -> Result<Value, Fault> {
     let mut expression = program.to_vec();
-    if expression.last().copied() != Some(0x0b) {
-        expression.push(0x0b);
-    }
+    // Module::get_expr returns expression bytes without the terminating END opcode.
+    // Always append it here; immediate bytes can legitimately be 0x0b (e.g. ref.func 11).
+    expression.push(0x0b);
     let const_program = decode(&expression).unwrap();
     let return_types = vec![return_type];
     let mut global_exec_frame = Frame {
@@ -1936,11 +2044,13 @@ pub(crate) fn eval_init_expr(
     // In this case the expectation is we run out of instructions, and the stack contains the return
     // value.
     let mut const_prg_tables = vec![];
+    let mut const_prg_element_segments = vec![];
     let result = execute(
         &mut global_exec_frame,
         &mut const_prg_memories,
         &mut const_prg_globals,
         &mut const_prg_tables,
+        &mut const_prg_element_segments,
         EXPR_TICK_LIMIT,
         types,
         functions,
@@ -2001,10 +2111,11 @@ fn execute_module_frame(
     max_ticks: usize,
 ) -> Result<(Continuation, usize), Fault> {
     let function_type_mapping = build_function_type_mapping(instance);
-    let (memories, globals, tables, module) = (
+    let (memories, globals, tables, element_segments, module) = (
         &mut instance.memories,
         &mut instance.globals,
         &mut instance.tables,
+        &mut instance.element_segments,
         &instance.module,
     );
     let mut memory_refs: Vec<&mut dyn Memory> =
@@ -2020,6 +2131,7 @@ fn execute_module_frame(
             &mut fallback_memories,
             globals,
             tables,
+            element_segments,
             max_ticks,
             &module.types,
             &function_type_mapping,
@@ -2031,6 +2143,7 @@ fn execute_module_frame(
             &mut memory_refs,
             globals,
             tables,
+            element_segments,
             max_ticks,
             &module.types,
             &function_type_mapping,
@@ -2159,9 +2272,12 @@ impl ExecutionState {
         let num_imported_funcs = instance.imported_functions.len() as u32;
         if funcidx < num_imported_funcs {
             let function_type_mapping = build_function_type_mapping(instance);
-            let type_idx = *function_type_mapping
-                .get(funcidx as usize)
-                .ok_or(ExecError::ExecutionFault(Fault::UnresolvableTypeIndex(funcidx)))?;
+            let type_idx =
+                *function_type_mapping
+                    .get(funcidx as usize)
+                    .ok_or(ExecError::ExecutionFault(Fault::UnresolvableTypeIndex(
+                        funcidx,
+                    )))?;
             let func_type = &instance.module.types[type_idx];
 
             for (i, (expected, actual)) in func_type.params.iter().zip(args.iter()).enumerate() {
@@ -2319,7 +2435,9 @@ impl ExecutionState {
                             let local_func_idx = funcidx - num_imported_funcs;
                             let func_index = local_func_idx as usize;
                             if func_index >= module.module.functions.len() {
-                                return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
+                                return Err(ExecError::ExecutionFault(
+                                    Fault::GlobalIndexOutOfBounds,
+                                ));
                             }
 
                             let type_idx = module.module.functions[func_index];
@@ -2380,7 +2498,9 @@ impl ExecutionState {
                             if expected_type.params != func_type.params
                                 || expected_type.results != func_type.results
                             {
-                                return Err(ExecError::ExecutionFault(Fault::IndirectCallTypeMismatch));
+                                return Err(ExecError::ExecutionFault(
+                                    Fault::IndirectCallTypeMismatch,
+                                ));
                             }
                         }
 
@@ -2580,7 +2700,10 @@ mod tests {
                 }
             }
         }
-        assert!(completed, "execution did not complete within expected slices");
+        assert!(
+            completed,
+            "execution did not complete within expected slices"
+        );
         assert_eq!(exec_state.frame_stack_len(), 0);
     }
 

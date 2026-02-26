@@ -61,6 +61,10 @@ pub enum Op {
     TableSet(u32),
     TableInit(u32, u32), // (table_idx, elem_idx)
     ElemDrop(u32),       // elem_idx
+    TableCopy(u32, u32), // (dst_table_idx, src_table_idx)
+    TableGrow(u32),      // table_idx
+    TableSize(u32),      // table_idx
+    TableFill(u32),      // table_idx
 
     // Loads.
     LoadI32(MemArg),

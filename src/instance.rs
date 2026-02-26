@@ -40,6 +40,7 @@ fn register_detached_snapshot(
     globals: &[GlobalVar],
     programs: &[Program],
     tables: &[TableInstance],
+    element_segments: &[Option<Vec<Value>>],
 ) {
     register_detached_instance(Instance {
         owner_id,
@@ -48,6 +49,7 @@ fn register_detached_snapshot(
         globals: globals.to_vec(),
         programs: programs.to_vec(),
         tables: tables.to_vec(),
+        element_segments: element_segments.to_vec(),
         imported_functions: vec![],
     });
 }
@@ -95,6 +97,7 @@ pub struct Instance {
     pub globals: Vec<GlobalVar>,
     pub programs: Vec<Program>,
     pub tables: Vec<TableInstance>,
+    pub element_segments: Vec<Option<Vec<Value>>>,
     pub imported_functions: Vec<ImportedFunction>,
 }
 
@@ -326,8 +329,71 @@ fn mk_instance_internal(
         });
     }
 
-    // Apply active element segments to initialize tables
+    // Materialize element segments so runtime table.init/elem.drop can use passive segments.
+    let mut materialized_element_segments = Vec::with_capacity(module.element_segments.len());
+    let mut element_segments = Vec::with_capacity(module.element_segments.len());
     for element_segment in &module.element_segments {
+        let segment_values = match &element_segment.elements {
+            crate::module::Elements::Function(func_indices) => func_indices
+                .iter()
+                .map(|&func_idx| {
+                    Value::FuncRef(Some(FuncRef {
+                        module_id: owner_id,
+                        func_idx,
+                    }))
+                })
+                .collect::<Vec<_>>(),
+            crate::module::Elements::Expression(exprs) => {
+                let mut values = Vec::with_capacity(exprs.len());
+                for expr in exprs {
+                    let expected_type = match element_segment.reftype {
+                        ReferenceType::FuncRef => ValueType::FuncRef,
+                        ReferenceType::ExternRef => ValueType::ExternRef,
+                    };
+                    let value = if has_imports {
+                        let mut function_types = Vec::new();
+                        for (_, _, import) in &module.imports {
+                            if let crate::module::Import::Func(type_idx) = import {
+                                function_types.push(*type_idx as usize);
+                            }
+                        }
+                        function_types.extend_from_slice(&module.functions);
+                        eval_init_expr(
+                            module.get_expr(expr),
+                            expected_type,
+                            &globals,
+                            &module.types,
+                            &function_types,
+                            owner_id,
+                        )
+                    } else {
+                        eval_init_expr(
+                            module.get_expr(expr),
+                            expected_type,
+                            &globals,
+                            &module.types,
+                            &module.functions,
+                            owner_id,
+                        )
+                    }
+                    .map_err(LinkError::ActiveExpressionError)?;
+                    values.push(value);
+                }
+                values
+            }
+        };
+
+        materialized_element_segments.push(segment_values.clone());
+        match &element_segment.mode {
+            crate::module::ElementMode::Passive => element_segments.push(Some(segment_values)),
+            crate::module::ElementMode::Active { .. } | crate::module::ElementMode::Declarative => {
+                element_segments.push(None);
+            }
+        }
+    }
+
+    // Apply active element segments to initialize tables.
+    for (segment_idx, element_segment) in module.element_segments.iter().enumerate() {
         if let crate::module::ElementMode::Active { table_index, expr } = &element_segment.mode {
             let table_idx = *table_index as usize;
             if table_idx < tables.len() {
@@ -370,89 +436,32 @@ fn mk_instance_internal(
                         &globals,
                         &programs,
                         &tables,
+                        &element_segments,
                     );
                     return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                 }
                 let offset = offset as usize;
 
-                match &element_segment.elements {
-                    crate::module::Elements::Function(func_indices) => {
-                        let mut table_elements = tables[table_idx].elements.borrow_mut();
-                        let write_end = offset.checked_add(func_indices.len()).ok_or(
-                            LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds),
-                        )?;
-                        if write_end > table_elements.len() {
-                            drop(table_elements);
-                            register_detached_snapshot(
-                                owner_id,
-                                &module,
-                                &memories,
-                                &globals,
-                                &programs,
-                                &tables,
-                            );
-                            return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
-                        }
-                        for (i, &func_idx) in func_indices.iter().enumerate() {
-                            table_elements[offset + i] = Some(Value::FuncRef(Some(FuncRef {
-                                module_id: owner_id,
-                                func_idx,
-                            })));
-                        }
-                    }
-                    crate::module::Elements::Expression(exprs) => {
-                        let mut table_elements = tables[table_idx].elements.borrow_mut();
-                        let write_end = offset
-                            .checked_add(exprs.len())
-                            .ok_or(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds))?;
-                        if write_end > table_elements.len() {
-                            drop(table_elements);
-                            register_detached_snapshot(
-                                owner_id,
-                                &module,
-                                &memories,
-                                &globals,
-                                &programs,
-                                &tables,
-                            );
-                            return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
-                        }
-
-                        for (i, expr) in exprs.iter().enumerate() {
-                            let expected_type = match element_segment.reftype {
-                                ReferenceType::FuncRef => ValueType::FuncRef,
-                                ReferenceType::ExternRef => ValueType::ExternRef,
-                            };
-                            let value = if has_imports {
-                                let mut function_types = Vec::new();
-                                for (_, _, import) in &module.imports {
-                                    if let crate::module::Import::Func(type_idx) = import {
-                                        function_types.push(*type_idx as usize);
-                                    }
-                                }
-                                function_types.extend_from_slice(&module.functions);
-                                eval_init_expr(
-                                    module.get_expr(expr),
-                                    expected_type,
-                                    &globals,
-                                    &module.types,
-                                    &function_types,
-                                    owner_id,
-                                )
-                            } else {
-                                eval_init_expr(
-                                    module.get_expr(expr),
-                                    expected_type,
-                                    &globals,
-                                    &module.types,
-                                    &module.functions,
-                                    owner_id,
-                                )
-                            }
-                            .map_err(LinkError::ActiveExpressionError)?;
-                            table_elements[offset + i] = Some(value);
-                        }
-                    }
+                let segment_values = &materialized_element_segments[segment_idx];
+                let mut table_elements = tables[table_idx].elements.borrow_mut();
+                let write_end = offset
+                    .checked_add(segment_values.len())
+                    .ok_or(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds))?;
+                if write_end > table_elements.len() {
+                    drop(table_elements);
+                    register_detached_snapshot(
+                        owner_id,
+                        &module,
+                        &memories,
+                        &globals,
+                        &programs,
+                        &tables,
+                        &element_segments,
+                    );
+                    return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
+                }
+                for (i, value) in segment_values.iter().enumerate() {
+                    table_elements[offset + i] = Some(*value);
                 }
             }
         }
@@ -516,6 +525,7 @@ fn mk_instance_internal(
                             &globals,
                             &programs,
                             &tables,
+                            &element_segments,
                         );
                         return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                     };
@@ -527,6 +537,7 @@ fn mk_instance_internal(
                             &globals,
                             &programs,
                             &tables,
+                            &element_segments,
                         );
                         return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                     }
@@ -579,6 +590,7 @@ fn mk_instance_internal(
                             &globals,
                             &programs,
                             &tables,
+                            &element_segments,
                         );
                         return Err(LinkError::MissingMemory);
                     }
@@ -590,6 +602,7 @@ fn mk_instance_internal(
                             &globals,
                             &programs,
                             &tables,
+                            &element_segments,
                         );
                         return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                     };
@@ -601,6 +614,7 @@ fn mk_instance_internal(
                             &globals,
                             &programs,
                             &tables,
+                            &element_segments,
                         );
                         return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                     }
@@ -618,6 +632,7 @@ fn mk_instance_internal(
                             &globals,
                             &programs,
                             &tables,
+                            &element_segments,
                         );
                         return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
                     }
@@ -635,6 +650,7 @@ fn mk_instance_internal(
         globals,
         programs,
         tables,
+        element_segments,
         imported_functions,
     };
 
@@ -664,7 +680,9 @@ fn mk_instance_internal(
                     register_detached_instance(detached_instance);
                 }
                 Err(match e {
-                    crate::exec::ExecError::ExecutionFault(f) => LinkError::ActiveExpressionError(f),
+                    crate::exec::ExecError::ExecutionFault(f) => {
+                        LinkError::ActiveExpressionError(f)
+                    }
                     crate::exec::ExecError::LinkageError(l) => l,
                 })
             }

@@ -919,6 +919,23 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                         let elem_idx = reader.load_imm_varuint32()?;
                         prg.push(Op::ElemDrop(elem_idx));
                     }
+                    14 => {
+                        let dst_table_idx = reader.load_imm_varuint32()?;
+                        let src_table_idx = reader.load_imm_varuint32()?;
+                        prg.push(Op::TableCopy(dst_table_idx, src_table_idx));
+                    }
+                    15 => {
+                        let table_idx = reader.load_imm_varuint32()?;
+                        prg.push(Op::TableGrow(table_idx));
+                    }
+                    16 => {
+                        let table_idx = reader.load_imm_varuint32()?;
+                        prg.push(Op::TableSize(table_idx));
+                    }
+                    17 => {
+                        let table_idx = reader.load_imm_varuint32()?;
+                        prg.push(Op::TableFill(table_idx));
+                    }
                     _ => {
                         return Err(DecodeError::UnimplementedOpcode(
                             sub_opcode as u8,
@@ -1001,7 +1018,9 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
             | OpCode::GetGlobal
             | OpCode::SetGlobal
             | OpCode::Call
-            | OpCode::RefFunc => {
+            | OpCode::RefFunc
+            | OpCode::TableGet
+            | OpCode::TableSet => {
                 reader.load_imm_varuint32()?;
             }
             OpCode::CurrentMemorySize | OpCode::GrowMemory => {
@@ -1096,6 +1115,20 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
                 match sub_opcode {
                     0..=7 => {
                         // trunc_sat operations - just consume the sub-opcode
+                    }
+                    12 => {
+                        reader.load_imm_varuint32()?; // elemidx
+                        reader.load_imm_varuint32()?; // tableidx
+                    }
+                    13 => {
+                        reader.load_imm_varuint32()?; // elemidx
+                    }
+                    14 => {
+                        reader.load_imm_varuint32()?; // dst tableidx
+                        reader.load_imm_varuint32()?; // src tableidx
+                    }
+                    15..=17 => {
+                        reader.load_imm_varuint32()?; // tableidx
                     }
                     _ => {
                         return Err(DecodeError::UnimplementedOpcode(
