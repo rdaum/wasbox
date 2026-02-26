@@ -147,6 +147,7 @@ pub fn mk_instance_with_imports(
                     )));
                 }
             }
+            crate::module::Import::Tag(_) => {}
         }
     }
 
@@ -222,6 +223,45 @@ fn mk_instance_internal(
         programs.push(program);
     }
 
+    // Populate globals early (imported first, then local) so subsequent table/element/data
+    // initializers can resolve global.get against full global index space.
+    let mut globals = Vec::with_capacity(imported_globals.len() + module.globals.len());
+    globals.extend(imported_global_vars.iter().cloned());
+    for global_segment in &module.globals {
+        let program = module.get_expr(&global_segment.expr);
+        let result = if has_imports {
+            let mut function_types = Vec::new();
+            for (_, _, import) in &module.imports {
+                if let crate::module::Import::Func(type_idx) = import {
+                    function_types.push(*type_idx as usize);
+                }
+            }
+            function_types.extend_from_slice(&module.functions);
+            eval_init_expr(
+                program,
+                global_segment.ty,
+                &globals,
+                &module.types,
+                &function_types,
+                owner_id,
+            )
+        } else {
+            eval_init_expr(
+                program,
+                global_segment.ty,
+                &globals,
+                &module.types,
+                &module.functions,
+                owner_id,
+            )
+        }
+        .map_err(LinkError::ActiveExpressionError)?;
+        globals.push(GlobalVar {
+            decl: global_segment.clone(),
+            value: result,
+        });
+    }
+
     // Initialize memories: imported memories first, then local memories
     let mut memories: Vec<_> = imported_memories.into_iter().collect();
     memories.extend(module.memories.iter().map(|m_decl| {
@@ -233,17 +273,58 @@ fn mk_instance_internal(
         )
     }));
 
-    // Initialize tables: imported tables first, then local tables
+    // Initialize tables: imported tables first, then local tables.
+    // Table declarations can optionally include an initializer expression; if present,
+    // initialize all slots with that value.
     let mut tables: Vec<_> = imported_tables.into_iter().collect();
-    tables.extend(module.tables.iter().map(|t_decl| {
+    for t_decl in &module.tables {
         let min_size = t_decl.limits.0;
         let max_size = t_decl.limits.1;
-        TableInstance {
-            elements: Rc::new(RefCell::new(vec![None; min_size as usize])),
+        let mut elements = vec![None; min_size as usize];
+
+        if let Some(expr) = t_decl.init_expr {
+            let expected_type = match t_decl.ty {
+                ReferenceType::FuncRef => ValueType::FuncRef,
+                ReferenceType::ExternRef => ValueType::ExternRef,
+            };
+            let init_value = if has_imports {
+                let mut function_types = Vec::new();
+                for (_, _, import) in &module.imports {
+                    if let crate::module::Import::Func(type_idx) = import {
+                        function_types.push(*type_idx as usize);
+                    }
+                }
+                function_types.extend_from_slice(&module.functions);
+                eval_init_expr(
+                    module.get_expr(&expr),
+                    expected_type,
+                    &globals,
+                    &module.types,
+                    &function_types,
+                    owner_id,
+                )
+            } else {
+                eval_init_expr(
+                    module.get_expr(&expr),
+                    expected_type,
+                    &globals,
+                    &module.types,
+                    &module.functions,
+                    owner_id,
+                )
+            }
+            .map_err(LinkError::ActiveExpressionError)?;
+            for slot in &mut elements {
+                *slot = Some(init_value);
+            }
+        }
+
+        tables.push(TableInstance {
+            elements: Rc::new(RefCell::new(elements)),
             ref_type: t_decl.ty,
             limits: (min_size, max_size),
-        }
-    }));
+        });
+    }
 
     // Apply active element segments to initialize tables
     for element_segment in &module.element_segments {
@@ -262,7 +343,7 @@ fn mk_instance_internal(
                     eval_init_expr(
                         module.get_expr(expr),
                         ValueType::I32,
-                        &imported_global_vars,
+                        &globals,
                         &module.types,
                         &function_types,
                         owner_id,
@@ -271,7 +352,7 @@ fn mk_instance_internal(
                     eval_init_expr(
                         module.get_expr(expr),
                         ValueType::I32,
-                        &[],
+                        &globals,
                         &module.types,
                         &module.functions,
                         owner_id,
@@ -286,7 +367,7 @@ fn mk_instance_internal(
                         owner_id,
                         &module,
                         &memories,
-                        &imported_global_vars,
+                        &globals,
                         &programs,
                         &tables,
                     );
@@ -306,7 +387,7 @@ fn mk_instance_internal(
                                 owner_id,
                                 &module,
                                 &memories,
-                                &imported_global_vars,
+                                &globals,
                                 &programs,
                                 &tables,
                             );
@@ -330,7 +411,7 @@ fn mk_instance_internal(
                                 owner_id,
                                 &module,
                                 &memories,
-                                &imported_global_vars,
+                                &globals,
                                 &programs,
                                 &tables,
                             );
@@ -353,7 +434,7 @@ fn mk_instance_internal(
                                 eval_init_expr(
                                     module.get_expr(expr),
                                     expected_type,
-                                    &imported_global_vars,
+                                    &globals,
                                     &module.types,
                                     &function_types,
                                     owner_id,
@@ -362,7 +443,7 @@ fn mk_instance_internal(
                                 eval_init_expr(
                                     module.get_expr(expr),
                                     expected_type,
-                                    &[],
+                                    &globals,
                                     &module.types,
                                     &module.functions,
                                     owner_id,
@@ -404,7 +485,7 @@ fn mk_instance_internal(
                         eval_init_expr(
                             module.get_expr(expr),
                             ValueType::I32,
-                            &imported_global_vars,
+                            &globals,
                             &module.types,
                             &function_types,
                             owner_id,
@@ -414,7 +495,7 @@ fn mk_instance_internal(
                         eval_init_expr(
                             module.get_expr(expr),
                             ValueType::I32,
-                            &[],
+                            &globals,
                             &module.types,
                             &module.functions,
                             owner_id,
@@ -432,7 +513,7 @@ fn mk_instance_internal(
                             owner_id,
                             &module,
                             &memories,
-                            &imported_global_vars,
+                            &globals,
                             &programs,
                             &tables,
                         );
@@ -443,7 +524,7 @@ fn mk_instance_internal(
                             owner_id,
                             &module,
                             &memories,
-                            &imported_global_vars,
+                            &globals,
                             &programs,
                             &tables,
                         );
@@ -467,7 +548,7 @@ fn mk_instance_internal(
                         eval_init_expr(
                             module.get_expr(expr),
                             ValueType::I32,
-                            &imported_global_vars,
+                            &globals,
                             &module.types,
                             &function_types,
                             owner_id,
@@ -477,7 +558,7 @@ fn mk_instance_internal(
                         eval_init_expr(
                             module.get_expr(expr),
                             ValueType::I32,
-                            &[],
+                            &globals,
                             &module.types,
                             &module.functions,
                             owner_id,
@@ -495,7 +576,7 @@ fn mk_instance_internal(
                             owner_id,
                             &module,
                             &memories,
-                            &imported_global_vars,
+                            &globals,
                             &programs,
                             &tables,
                         );
@@ -506,7 +587,7 @@ fn mk_instance_internal(
                             owner_id,
                             &module,
                             &memories,
-                            &imported_global_vars,
+                            &globals,
                             &programs,
                             &tables,
                         );
@@ -517,7 +598,7 @@ fn mk_instance_internal(
                             owner_id,
                             &module,
                             &memories,
-                            &imported_global_vars,
+                            &globals,
                             &programs,
                             &tables,
                         );
@@ -534,7 +615,7 @@ fn mk_instance_internal(
                             owner_id,
                             &module,
                             &memories,
-                            &imported_global_vars,
+                            &globals,
                             &programs,
                             &tables,
                         );
@@ -545,51 +626,6 @@ fn mk_instance_internal(
                 }
             }
         }
-    }
-
-    // Populate globals: imported globals first, then local globals
-    let mut globals = Vec::with_capacity(imported_globals.len() + module.globals.len());
-
-    // Add imported globals first (reuse the ones we created for initialization context)
-    globals.extend(imported_global_vars.iter().cloned());
-
-    // Then add local globals
-    for global_segment in &module.globals {
-        // Execute the expression in the global
-        let program = module.get_expr(&global_segment.expr);
-        let result = if has_imports {
-            // Build complete function index space: [imported_functions] + [local_functions]
-            let mut function_types = Vec::new();
-            for (_, _, import) in &module.imports {
-                if let crate::module::Import::Func(type_idx) = import {
-                    function_types.push(*type_idx as usize);
-                }
-            }
-            function_types.extend_from_slice(&module.functions);
-            eval_init_expr(
-                program,
-                global_segment.ty,
-                &imported_global_vars,
-                &module.types,
-                &function_types,
-                owner_id,
-            )
-        } else {
-            // Even without imports, we need to pass function information for ref.func to work
-            eval_init_expr(
-                program,
-                global_segment.ty,
-                &[],
-                &module.types,
-                &module.functions,
-                owner_id,
-            )
-        }
-        .map_err(LinkError::ActiveExpressionError)?;
-        globals.push(GlobalVar {
-            decl: global_segment.clone(),
-            value: result,
-        });
     }
 
     let instance = Instance {

@@ -33,6 +33,7 @@ pub const SECTION_ID_ELEMENT: u8 = 9;
 pub const SECTION_ID_CODE: u8 = 10;
 pub const SECTION_ID_DATA: u8 = 11;
 pub const SECTION_ID_DATA_COUNT: u8 = 12;
+pub const SECTION_ID_TAG: u8 = 13;
 
 fn read_limits(reader: &mut LEB128Reader) -> Result<(u32, Option<u32>), DecodeError> {
     // "Limits are encoded with a preceding flag indicating whether a maximum is present."
@@ -69,12 +70,86 @@ fn read_limits(reader: &mut LEB128Reader) -> Result<(u32, Option<u32>), DecodeEr
     Ok(limits)
 }
 
+fn read_reference_type_with_lead(
+    reader: &mut LEB128Reader,
+    lead: u8,
+) -> Result<ReferenceType, LoaderError> {
+    let ty = match lead {
+        0x70 => ReferenceType::FuncRef,
+        0x6f => ReferenceType::ExternRef,
+        0x40 => ReferenceType::ExternRef,
+        // ref null/ref/shared prefixes. Consume heap type payload and coerce to supported type.
+        0x63 | 0x64 | 0x65 => {
+            let heap_type = reader.load_imm_varint32().map_err(DecoderError)?;
+            match heap_type {
+                -17 => ReferenceType::ExternRef,
+                -13 | -16 => ReferenceType::FuncRef,
+                _ if heap_type >= 0 => ReferenceType::FuncRef,
+                _ => ReferenceType::ExternRef,
+            }
+        }
+        // Other abstract heap refs are accepted as generic extern-like refs for now.
+        0x73 => ReferenceType::FuncRef,
+        0x6e | 0x6d | 0x6c | 0x6b | 0x6a | 0x69 | 0x68 | 0x71 | 0x72 | 0x74 | 0x75 => {
+            ReferenceType::ExternRef
+        }
+        _ => {
+            // Concrete heap type indices are encoded as signed LEB with non-negative values.
+            // Consume the rest of the SLEB payload when present and treat concrete refs
+            // as function refs in this runtime model.
+            let mut value = (lead & 0x7f) as i32;
+            let mut shift = 7;
+            let mut last = lead;
+            while (last & 0x80) != 0 {
+                let byte = reader.load_imm_u8().map_err(DecoderError)?;
+                value |= ((byte & 0x7f) as i32) << shift;
+                shift += 7;
+                last = byte;
+            }
+            if shift < 32 && (last & 0x40) != 0 {
+                value |= !0 << shift;
+            }
+            if value >= 0 {
+                ReferenceType::FuncRef
+            } else {
+                return Err(LoaderError::InvalidReferenceType(lead));
+            }
+        }
+    };
+    Ok(ty)
+}
+
+fn read_reference_type(reader: &mut LEB128Reader) -> Result<ReferenceType, LoaderError> {
+    let lead = reader.load_imm_u8().map_err(DecoderError)?;
+    read_reference_type_with_lead(reader, lead)
+}
+
 fn read_table(reader: &mut LEB128Reader) -> Result<Table, LoaderError> {
-    let ty = reader.load_imm_u8().map_err(DecoderError)?;
-    let ty = ReferenceType::from_u8(ty)?;
+    // Extended encoding for table initializer expressions:
+    // 0x40 0x00 <tabletype> <const expr>
+    let first = reader.load_imm_u8().map_err(DecoderError)?;
+    let (ty_lead, has_init_expr) = if first == 0x40 {
+        let second = reader.load_imm_u8().map_err(DecoderError)?;
+        if second != 0x00 {
+            return Err(DecoderError(FailedToDecode("invalid table encoding".to_string())));
+        }
+        (reader.load_imm_u8().map_err(DecoderError)?, true)
+    } else {
+        (first, false)
+    };
+    let ty = read_reference_type_with_lead(reader, ty_lead)?;
 
     let limits = read_limits(reader).map_err(DecoderError)?;
-    Ok(Table { ty, limits })
+    let init_expr = if has_init_expr {
+        Some(reader.load_expr().map_err(DecoderError)?)
+    } else {
+        None
+    };
+    Ok(Table {
+        ty,
+        limits,
+        init_expr,
+    })
 }
 
 const MAX_MEMORY_SIZE_PAGES: u32 = 0x10000;
@@ -93,6 +168,7 @@ fn section_order(section_type: SectionType) -> u8 {
         SectionType::DataCount => 10,
         SectionType::Code => 11,
         SectionType::Data => 12,
+        SectionType::Tag => 13,
         SectionType::Custom => 0,
     }
 }
@@ -132,7 +208,7 @@ impl Module {
         let mut element_segments = vec![];
         let mut start_function = None;
         let mut data_count = None;
-        let mut seen_sections = [false; 13];
+        let mut seen_sections = [false; 14];
         let mut last_section_order = 0u8;
         while reader.remaining() > 0 {
             // Read the section ID
@@ -148,7 +224,7 @@ impl Module {
             }
 
             let section_type = SectionType::from_u8(section_type)?;
-            if !matches!(section_type, SectionType::Custom) {
+            if !matches!(section_type, SectionType::Custom | SectionType::Tag) {
                 let order = section_order(section_type);
                 if order < last_section_order || seen_sections[order as usize] {
                     return Err(DecoderError(FailedToDecode(
@@ -167,9 +243,10 @@ impl Module {
                     for _ in 0..func_types {
                         let func_type_marker = reader.load_imm_u8().map_err(DecoderError)?;
                         if func_type_marker != 0x60 {
-                            return Err(DecoderError(FailedToDecode(format!(
-                                "Invalid function type marker: expected 0x60, got 0x{func_type_marker:02x}"
-                            ))));
+                            return Err(DecoderError(DecodeError::UnsupportedType(
+                                func_type_marker as u32,
+                                "non-function type definitions are not supported".to_string(),
+                            )));
                         }
 
                         let num_param_types = reader.load_imm_varuint32().map_err(DecoderError)?;
@@ -262,8 +339,7 @@ impl Module {
                                 Import::Func(function_index)
                             }
                             ImportExportKind::Table => {
-                                let reftype = reader.load_imm_u8().map_err(DecoderError)?;
-                                let reftype = ReferenceType::from_u8(reftype)?;
+                                let reftype = read_reference_type(&mut reader)?;
                                 let limits = read_limits(&mut reader).map_err(DecoderError)?;
                                 Import::Table(reftype, limits)
                             }
@@ -285,6 +361,16 @@ impl Module {
                                     }
                                 };
                                 Import::Global(valtype, is_mut)
+                            }
+                            ImportExportKind::Tag => {
+                                let tag_kind = reader.load_imm_u8().map_err(DecoderError)?;
+                                if tag_kind != 0 {
+                                    return Err(DecoderError(FailedToDecode(format!(
+                                        "Unsupported tag kind: {tag_kind}"
+                                    ))));
+                                }
+                                let tag_type = reader.load_imm_varuint32().map_err(DecoderError)?;
+                                Import::Tag(tag_type)
                             }
                         };
                         imports.push((module, field, import));
@@ -324,12 +410,7 @@ impl Module {
                                 }
                             }
                             1 => {
-                                let kind = reader.load_imm_u8().map_err(DecoderError)?;
-                                let reftype = if kind == 0 {
-                                    ReferenceType::FuncRef
-                                } else {
-                                    ReferenceType::from_u8(kind)?
-                                };
+                                let reftype = read_reference_type(&mut reader)?;
                                 let num_func_indices =
                                     reader.load_imm_varuint32().map_err(DecoderError)?;
                                 let func_indices = (0..num_func_indices)
@@ -400,12 +481,7 @@ impl Module {
                                 }
                             }
                             5 => {
-                                let kind = reader.load_imm_u8().map_err(DecoderError)?;
-                                let reftype = if kind == 0 {
-                                    ReferenceType::FuncRef
-                                } else {
-                                    ReferenceType::from_u8(kind)?
-                                };
+                                let reftype = read_reference_type(&mut reader)?;
                                 let num_elem_exprs =
                                     reader.load_imm_varuint32().map_err(DecoderError)?;
                                 let elem_exprs = (0..num_elem_exprs)
@@ -421,12 +497,7 @@ impl Module {
                                 let table_index =
                                     reader.load_imm_varuint32().map_err(DecoderError)?;
                                 let init_expr = reader.load_expr().map_err(DecoderError)?;
-                                let kind = reader.load_imm_u8().map_err(DecoderError)?;
-                                let reftype = if kind == 0 {
-                                    ReferenceType::FuncRef
-                                } else {
-                                    ReferenceType::from_u8(kind)?
-                                };
+                                let reftype = read_reference_type(&mut reader)?;
                                 let num_elem_exprs =
                                     reader.load_imm_varuint32().map_err(DecoderError)?;
                                 let elem_exprs = (0..num_elem_exprs)
@@ -442,12 +513,7 @@ impl Module {
                                 }
                             }
                             7 => {
-                                let kind = reader.load_imm_u8().map_err(DecoderError)?;
-                                let reftype = if kind == 0 {
-                                    ReferenceType::FuncRef
-                                } else {
-                                    ReferenceType::from_u8(kind)?
-                                };
+                                let reftype = read_reference_type(&mut reader)?;
                                 let num_elem_exprs =
                                     reader.load_imm_varuint32().map_err(DecoderError)?;
                                 let elem_exprs = (0..num_elem_exprs)
@@ -552,6 +618,18 @@ impl Module {
                 SectionType::DataCount => {
                     data_count = Some(reader.load_imm_varuint32().map_err(DecoderError)?);
                 }
+                SectionType::Tag => {
+                    let num_tags = reader.load_imm_varuint32().map_err(DecoderError)?;
+                    for _ in 0..num_tags {
+                        let tag_kind = reader.load_imm_u8().map_err(DecoderError)?;
+                        if tag_kind != 0 {
+                            return Err(DecoderError(FailedToDecode(format!(
+                                "Unsupported tag kind: {tag_kind}"
+                            ))));
+                        }
+                        let _type_index = reader.load_imm_varuint32().map_err(DecoderError)?;
+                    }
+                }
             }
 
             let what_we_read = reader.position() - offset;
@@ -635,6 +713,7 @@ mod tests {
             vec![Table {
                 ty: ReferenceType::FuncRef,
                 limits: (32, None),
+                init_expr: None,
             }]
         );
 

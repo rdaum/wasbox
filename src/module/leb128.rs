@@ -141,8 +141,7 @@ impl LEB128Reader<'_> {
     }
 
     pub fn load_imm_varint32(&mut self) -> Result<i32, DecodeError> {
-        let value = self.load_imm_varuint32()?;
-        Ok(value as i32)
+        self.load_imm_signed_varint32()
     }
 
     /// Read a signed LEB128 integer (for constants)

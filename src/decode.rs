@@ -72,6 +72,19 @@ impl Error for DecodeError {}
 
 const MAX_MEMORY_OFFSET: u32 = 0xffff_ffff;
 
+fn read_heap_type_as_value(reader: &mut LEB128Reader) -> Result<ValueType, DecodeError> {
+    let heap_type = reader.load_imm_varint32()?;
+    Ok(match heap_type {
+        -17 => ValueType::ExternRef,
+        -13 | -16 => ValueType::FuncRef,
+        // Typed references (concrete type indices) are represented as function refs in this
+        // runtime model.
+        _ if heap_type >= 0 => ValueType::FuncRef,
+        // Other abstract heap types are treated as generic host refs for now.
+        _ => ValueType::ExternRef,
+    })
+}
+
 fn read_memarg(reader: &mut LEB128Reader, max_align: u8) -> Result<MemArg, DecodeError> {
     // Extended memarg flags used by the multi-memory proposal:
     // bit 6 => explicit memory index follows.
@@ -833,15 +846,13 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 let type_count = reader.load_imm_varuint32()?;
                 let mut types = Vec::new();
                 for _ in 0..type_count {
-                    let type_byte = reader.load_imm_u8()?;
-                    let val_type = ValueType::from_u32(type_byte as u32)?;
+                    let val_type = ValueType::read(&mut reader)?;
                     types.push(val_type);
                 }
                 prg.push(Op::SelectT(types));
             }
             OpCode::RefNull => {
-                let type_byte = reader.load_imm_u8()?;
-                let val_type = ValueType::from_u32(type_byte as u32)?;
+                let val_type = read_heap_type_as_value(&mut reader)?;
                 prg.push(Op::RefNull(val_type));
             }
             OpCode::IsNull => {
@@ -1036,7 +1047,7 @@ pub fn scan(reader: &mut LEB128Reader) -> Result<usize, DecodeError> {
                 reader.load_imm_f64();
             }
             OpCode::RefNull => {
-                reader.load_imm_u8()?;
+                reader.load_imm_varint32()?;
             }
 
             OpCode::I32Extend8S

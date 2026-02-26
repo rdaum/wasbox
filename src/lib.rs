@@ -83,7 +83,11 @@ impl ValueType {
         match value {
             0x40 => Ok(ValueType::Unit),
             0x70 => Ok(ValueType::FuncRef),
+            0x73 => Ok(ValueType::FuncRef),
             0x6f => Ok(ValueType::ExternRef),
+            0x6e | 0x6d | 0x6c | 0x6b | 0x6a | 0x69 | 0x68 | 0x71 | 0x72 | 0x74 | 0x75 => {
+                Ok(ValueType::ExternRef)
+            }
             0x7F => Ok(ValueType::I32),
             0x7E => Ok(ValueType::I64),
             0x7D => Ok(ValueType::F32),
@@ -93,27 +97,80 @@ impl ValueType {
         }
     }
 
+    fn from_s33(value: i32) -> Result<Self, DecodeError> {
+        match value {
+            -64 => Ok(ValueType::Unit),
+            -1 => Ok(ValueType::I32),
+            -2 => Ok(ValueType::I64),
+            -3 => Ok(ValueType::F32),
+            -4 => Ok(ValueType::F64),
+            -5 => Ok(ValueType::V128),
+            -16 => Ok(ValueType::FuncRef),
+            -13 => Ok(ValueType::FuncRef),
+            -17 => Ok(ValueType::ExternRef),
+            // Accept newer abstract heap/reference families as a generic host reference.
+            -18 | -19 | -20 | -21 | -22 | -23 | -24 | -15 | -14 | -12 | -11 => {
+                Ok(ValueType::ExternRef)
+            }
+            _ => Err(DecodeError::InvalidSignature(value as u32)),
+        }
+    }
+
+    fn read_ref_type_suffix(reader: &mut LEB128Reader) -> Result<Self, DecodeError> {
+        let heap_type = reader.load_imm_varint32()?;
+        match heap_type {
+            -17 => Ok(ValueType::ExternRef),
+            -13 | -16 => Ok(ValueType::FuncRef),
+            // Treat concrete and GC heap types as generic references for now.
+            _ if heap_type >= 0 => Ok(ValueType::FuncRef),
+            _ => Ok(ValueType::ExternRef),
+        }
+    }
+
+    fn try_read_with_lead(reader: &mut LEB128Reader, lead: u8) -> Result<Self, DecodeError> {
+        match lead {
+            0x63 | 0x64 | 0x65 => Self::read_ref_type_suffix(reader),
+            _ => Self::from_u32(lead as u32),
+        }
+    }
+
     /// Read a value type from a reader without allowing for type index indirection.
     fn read(reader: &mut LEB128Reader) -> Result<Self, DecodeError> {
-        let value = reader.load_imm_varuint32()?;
-        if value == 0x40 {
-            return Ok(ValueType::Unit);
-        }
-        Self::from_u32(value)
+        let lead = reader.load_imm_u8()?;
+        Self::try_read_with_lead(reader, lead)
     }
 
     /// Read a full signature, allowing for type index indirection.
     fn read_signature(reader: &mut LEB128Reader) -> Result<TypeSignature, DecodeError> {
-        let value = reader.load_imm_varint32()?;
-        if value == 0x40 {
+        let lead = reader.load_imm_u8()?;
+        if lead == 0x40 {
             return Ok(TypeSignature::ValueType(ValueType::Unit));
         }
-        if value < 0 {
-            return Self::from_u32(value.unsigned_abs()).map(TypeSignature::ValueType);
-        }
-        // Also check if it's a value type when interpreted as unsigned
-        if let Ok(vt) = Self::from_u32(value as u32) {
+
+        // Common case: direct value/ref type encoding.
+        if let Ok(vt) = Self::try_read_with_lead(reader, lead) {
             return Ok(TypeSignature::ValueType(vt));
+        }
+
+        // Otherwise this is a signed LEB block type index that started with `lead`.
+        let mut value = (lead & 0x7f) as i32;
+        let mut shift = 7;
+        let mut last_byte = lead;
+        while (last_byte & 0x80) != 0 {
+            let byte = reader.load_imm_u8()?;
+            value |= ((byte & 0x7f) as i32) << shift;
+            shift += 7;
+            last_byte = byte;
+        }
+        if shift < 32 && (last_byte & 0x40) != 0 {
+            value |= !0 << shift;
+        }
+
+        if let Ok(vt) = Self::from_s33(value) {
+            return Ok(TypeSignature::ValueType(vt));
+        }
+        if value < 0 {
+            return Err(DecodeError::InvalidSignature(value as u32));
         }
         Ok(TypeSignature::Index(value as u32))
     }

@@ -17,8 +17,8 @@ mod parse;
 pub use crate::module::leb128::LEB128Reader;
 use crate::module::parse::{
     SECTION_ID_CODE, SECTION_ID_CUSTOM, SECTION_ID_DATA, SECTION_ID_DATA_COUNT, SECTION_ID_ELEMENT,
-    SECTION_ID_EXPORT, SECTION_ID_FUNCTION, SECTION_ID_GLOBAL, SECTION_ID_IMPORT,
-    SECTION_ID_MEMORY, SECTION_ID_START, SECTION_ID_TABLE, SECTION_ID_TYPE,
+    SECTION_ID_EXPORT, SECTION_ID_FUNCTION, SECTION_ID_GLOBAL, SECTION_ID_IMPORT, SECTION_ID_MEMORY,
+    SECTION_ID_START, SECTION_ID_TABLE, SECTION_ID_TAG, SECTION_ID_TYPE,
 };
 use crate::LoaderError::{DecoderError, UnsupportedSectionType};
 use crate::{DecodeError, FuncType, ValueType};
@@ -78,6 +78,7 @@ pub enum SectionType {
     Code = SECTION_ID_CODE,
     Data = SECTION_ID_DATA,
     DataCount = SECTION_ID_DATA_COUNT,
+    Tag = SECTION_ID_TAG,
 }
 
 impl SectionType {
@@ -96,6 +97,7 @@ impl SectionType {
             SECTION_ID_CODE => Ok(SectionType::Code),
             SECTION_ID_DATA => Ok(SectionType::Data),
             SECTION_ID_DATA_COUNT => Ok(SectionType::DataCount),
+            SECTION_ID_TAG => Ok(SectionType::Tag),
             _ => Err(LoaderError::InvalidSectionType(value)),
         }
     }
@@ -135,6 +137,7 @@ pub struct ExportEntry {
 pub struct Table {
     pub ty: ReferenceType,
     pub limits: (u32, Option<u32>),
+    pub init_expr: Option<Region>,
 }
 
 /// Declaration of a memory section in the program.
@@ -173,7 +176,7 @@ pub enum ImportExportKind {
     Table = 0x01,
     Memory = 0x02,
     Global = 0x03,
-    // Tag = 0x04,
+    Tag = 0x04,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -182,6 +185,7 @@ pub enum Import {
     Table(ReferenceType, (u32, Option<u32>)),
     Memory((u32, Option<u32>)),
     Global(ValueType, bool),
+    Tag(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -218,6 +222,7 @@ impl ImportExportKind {
             0x01 => Ok(ImportExportKind::Table),
             0x02 => Ok(ImportExportKind::Memory),
             0x03 => Ok(ImportExportKind::Global),
+            0x04 => Ok(ImportExportKind::Tag),
             _ => Err(LoaderError::InvalidImportType(value)),
         }
     }
