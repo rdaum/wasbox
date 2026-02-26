@@ -46,6 +46,7 @@ impl Frame {
         }
     }
 
+    #[inline(always)]
     pub fn push_control(
         &mut self,
         signature: TypeSignature,
@@ -62,6 +63,7 @@ impl Frame {
         });
     }
 
+    #[inline(always)]
     pub fn pop_control(&mut self, types: &[FuncType]) -> Result<Control, Fault> {
         let c = self
             .control_stack
@@ -88,6 +90,26 @@ impl Frame {
         }
 
         Ok(c)
+    }
+
+    #[inline(always)]
+    pub fn reset_for_function(&mut self, signature: TypeSignature, end_pc: usize) {
+        self.stack.shrink_to(0);
+        self.pc = 0;
+        self.scratch_values_raw.clear();
+        let function_control = Control {
+            signature,
+            scope_type: ScopeType::Function,
+            stack_width: 0,
+            start_pc: 0,
+            end_pc,
+        };
+        if self.control_stack.is_empty() {
+            self.control_stack.push(function_control);
+        } else {
+            self.control_stack[0] = function_control;
+            self.control_stack.truncate(1);
+        }
     }
 
     pub fn push_local_to_stack(&mut self, local_index: u32) -> Result<(), Fault> {

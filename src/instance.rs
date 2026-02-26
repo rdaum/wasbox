@@ -11,7 +11,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-use crate::decode::{decode, Program, ScopeType};
+use crate::decode::{decode, Program};
 use crate::exec::{eval_init_expr, register_detached_instance, Fault, FuncRef, GlobalVar, Value};
 use crate::frame::Frame;
 use crate::import::{ImportResolver, ImportedFunction};
@@ -937,13 +937,8 @@ impl Instance {
             scratch_values_raw: Vec::with_capacity(8),
         };
 
-        // Add function scope for proper control flow management
-        frame.push_control(
-            self.function_scope_signatures[index],
-            ScopeType::Function,
-            0,
-            program.ops.len(),
-        );
+        // Add function scope for proper control flow management.
+        frame.reset_for_function(self.function_scope_signatures[index], program.ops.len());
         Ok(frame)
     }
 
@@ -996,10 +991,53 @@ impl Instance {
             scratch_values_raw: Vec::with_capacity(8),
         };
 
-        frame.push_control(
-            self.function_scope_signatures[index],
-            ScopeType::Function,
-            0,
+        frame.reset_for_function(self.function_scope_signatures[index], program.ops.len());
+        Ok(frame)
+    }
+
+    /// Hot-path helper for modules without imported functions.
+    /// Caller must ensure `local_idx < self.programs.len()`.
+    #[inline(always)]
+    pub unsafe fn frame_for_local_idx_from_stack_unchecked(
+        &self,
+        local_idx: usize,
+        stack: &mut Stack,
+    ) -> Result<Frame, Fault> {
+        let program = self.programs.get_unchecked(local_idx);
+        let param_types = self.function_param_types.get_unchecked(local_idx);
+        let param_count = param_types.len();
+        let local_defaults = self.program_local_defaults.get_unchecked(local_idx);
+        let mut locals = vec![0u64; param_count + local_defaults.len()];
+        match param_count {
+            0 => {}
+            1 => {
+                locals[0] = stack.pop_u64()?;
+            }
+            2 => {
+                locals[1] = stack.pop_u64()?;
+                locals[0] = stack.pop_u64()?;
+            }
+            _ => {
+                for i in (0..param_count).rev() {
+                    locals[i] = stack.pop_u64()?;
+                }
+            }
+        }
+        if !local_defaults.is_empty() {
+            locals[param_count..].copy_from_slice(local_defaults);
+        }
+
+        let mut frame = Frame {
+            locals,
+            program: Rc::clone(program),
+            stack: Stack::new(),
+            pc: 0,
+            control_stack: Vec::with_capacity(8),
+            scratch_values_raw: Vec::with_capacity(8),
+        };
+
+        frame.reset_for_function(
+            *self.function_scope_signatures.get_unchecked(local_idx),
             program.ops.len(),
         );
         Ok(frame)
@@ -1027,7 +1065,9 @@ impl Instance {
         let local_defaults = &self.program_local_defaults[index];
         let total_locals = param_count + local_defaults.len();
 
-        frame.locals.resize(total_locals, 0);
+        if frame.locals.len() != total_locals {
+            frame.locals.resize(total_locals, 0);
+        }
         match param_count {
             0 => {}
             1 => {
@@ -1050,15 +1090,52 @@ impl Instance {
         if !Rc::ptr_eq(&frame.program, program) {
             frame.program = Rc::clone(program);
         }
-        frame.stack.shrink_to(0);
-        frame.pc = 0;
-        frame.control_stack.clear();
-        frame.scratch_values_raw.clear();
+        frame.reset_for_function(self.function_scope_signatures[index], program.ops.len());
+        Ok(())
+    }
 
-        frame.push_control(
-            self.function_scope_signatures[index],
-            ScopeType::Function,
-            0,
+    /// Hot-path helper for modules without imported functions.
+    /// Caller must ensure `local_idx < self.programs.len()`.
+    #[inline(always)]
+    pub unsafe fn refill_frame_for_local_idx_from_stack_unchecked(
+        &self,
+        local_idx: usize,
+        stack: &mut Stack,
+        frame: &mut Frame,
+    ) -> Result<(), Fault> {
+        let program = self.programs.get_unchecked(local_idx);
+        let param_types = self.function_param_types.get_unchecked(local_idx);
+        let param_count = param_types.len();
+        let local_defaults = self.program_local_defaults.get_unchecked(local_idx);
+        let total_locals = param_count + local_defaults.len();
+
+        if frame.locals.len() != total_locals {
+            frame.locals.resize(total_locals, 0);
+        }
+        match param_count {
+            0 => {}
+            1 => {
+                frame.locals[0] = stack.pop_u64()?;
+            }
+            2 => {
+                frame.locals[1] = stack.pop_u64()?;
+                frame.locals[0] = stack.pop_u64()?;
+            }
+            _ => {
+                for i in (0..param_count).rev() {
+                    frame.locals[i] = stack.pop_u64()?;
+                }
+            }
+        }
+        if !local_defaults.is_empty() {
+            frame.locals[param_count..].copy_from_slice(local_defaults);
+        }
+
+        if !Rc::ptr_eq(&frame.program, program) {
+            frame.program = Rc::clone(program);
+        }
+        frame.reset_for_function(
+            *self.function_scope_signatures.get_unchecked(local_idx),
             program.ops.len(),
         );
         Ok(())
@@ -1114,7 +1191,9 @@ impl Instance {
         let local_defaults = &self.program_local_defaults[local_idx];
         let total_locals = param_count + local_defaults.len();
 
-        frame.locals.resize(total_locals, 0);
+        if frame.locals.len() != total_locals {
+            frame.locals.resize(total_locals, 0);
+        }
         for (i, arg) in args.iter().take(param_count).enumerate() {
             frame.locals[i] = arg.to_raw();
         }
@@ -1126,17 +1205,7 @@ impl Instance {
         if !Rc::ptr_eq(&frame.program, program) {
             frame.program = Rc::clone(program);
         }
-        frame.stack.shrink_to(0);
-        frame.pc = 0;
-        frame.control_stack.clear();
-        frame.scratch_values_raw.clear();
-
-        frame.push_control(
-            self.function_scope_signatures[local_idx],
-            ScopeType::Function,
-            0,
-            program.ops.len(),
-        );
+        frame.reset_for_function(self.function_scope_signatures[local_idx], program.ops.len());
         Ok(())
     }
 }

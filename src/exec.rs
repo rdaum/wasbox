@@ -528,9 +528,10 @@ fn execute<const TRACK_TICKS: bool>(
                 if *local_idx as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                if frame.program.local_types[*local_idx as usize] != ValueType::I64 {
-                    return Err(Fault::Unreachable);
-                }
+                debug_assert_eq!(
+                    frame.program.local_types[*local_idx as usize],
+                    ValueType::I64
+                );
                 let v = frame.locals[*local_idx as usize];
                 if v == 0 {
                     execute_branch(frame, types, *depth as usize)?;
@@ -541,11 +542,14 @@ fn execute<const TRACK_TICKS: bool>(
                 if *lhs_local as usize >= frame.locals.len() || *rhs_local as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                if frame.program.local_types[*lhs_local as usize] != ValueType::I32
-                    || frame.program.local_types[*rhs_local as usize] != ValueType::I32
-                {
-                    return Err(Fault::Unreachable);
-                }
+                debug_assert_eq!(
+                    frame.program.local_types[*lhs_local as usize],
+                    ValueType::I32
+                );
+                debug_assert_eq!(
+                    frame.program.local_types[*rhs_local as usize],
+                    ValueType::I32
+                );
                 let lhs = frame.locals[*lhs_local as usize] as u32;
                 let rhs = frame.locals[*rhs_local as usize] as u32;
                 if lhs >= rhs {
@@ -655,9 +659,7 @@ fn execute<const TRACK_TICKS: bool>(
                 if *src as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                if frame.program.local_types[*src as usize] != ValueType::I32 {
-                    return Err(Fault::Unreachable);
-                }
+                debug_assert_eq!(frame.program.local_types[*src as usize], ValueType::I32);
                 let v = frame.locals[*src as usize] as i32;
                 frame
                     .stack
@@ -668,11 +670,8 @@ fn execute<const TRACK_TICKS: bool>(
                 if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                if frame.program.local_types[*src as usize] != ValueType::I32
-                    || frame.program.local_types[*dst as usize] != ValueType::I32
-                {
-                    return Err(Fault::Unreachable);
-                }
+                debug_assert_eq!(frame.program.local_types[*src as usize], ValueType::I32);
+                debug_assert_eq!(frame.program.local_types[*dst as usize], ValueType::I32);
                 let v = frame.locals[*src as usize] as i32;
                 frame.locals[*dst as usize] = v.wrapping_mul(*mul).wrapping_add(*add) as i64 as u64;
                 continue;
@@ -681,11 +680,8 @@ fn execute<const TRACK_TICKS: bool>(
                 if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                if frame.program.local_types[*src as usize] != ValueType::I32
-                    || frame.program.local_types[*dst as usize] != ValueType::I32
-                {
-                    return Err(Fault::Unreachable);
-                }
+                debug_assert_eq!(frame.program.local_types[*src as usize], ValueType::I32);
+                debug_assert_eq!(frame.program.local_types[*dst as usize], ValueType::I32);
                 let v = frame.locals[*src as usize] as i32;
                 frame.locals[*dst as usize] = v.wrapping_add(*add) as i64 as u64;
                 continue;
@@ -697,12 +693,9 @@ fn execute<const TRACK_TICKS: bool>(
                 {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                if frame.program.local_types[*a as usize] != ValueType::I64
-                    || frame.program.local_types[*b as usize] != ValueType::I64
-                    || frame.program.local_types[*dst as usize] != ValueType::I64
-                {
-                    return Err(Fault::Unreachable);
-                }
+                debug_assert_eq!(frame.program.local_types[*a as usize], ValueType::I64);
+                debug_assert_eq!(frame.program.local_types[*b as usize], ValueType::I64);
+                debug_assert_eq!(frame.program.local_types[*dst as usize], ValueType::I64);
                 let av = frame.locals[*a as usize];
                 let bv = frame.locals[*b as usize];
                 frame.locals[*dst as usize] = av.wrapping_add(bv);
@@ -712,11 +705,8 @@ fn execute<const TRACK_TICKS: bool>(
                 if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                if frame.program.local_types[*src as usize] != ValueType::I64
-                    || frame.program.local_types[*dst as usize] != ValueType::I64
-                {
-                    return Err(Fault::Unreachable);
-                }
+                debug_assert_eq!(frame.program.local_types[*src as usize], ValueType::I64);
+                debug_assert_eq!(frame.program.local_types[*dst as usize], ValueType::I64);
                 let v = frame.locals[*src as usize];
                 frame.locals[*dst as usize] = v.wrapping_sub(*c as u64);
                 continue;
@@ -2655,6 +2645,7 @@ impl Display for ExecError {
 
 impl Error for ExecError {}
 
+#[inline(always)]
 fn execute_module_frame<const TRACK_TICKS: bool>(
     module_id: u32,
     frame: &mut Frame,
@@ -2753,12 +2744,14 @@ impl ExecutionState {
         }
     }
 
+    #[inline(always)]
     fn recycle_frame(&mut self, frame: Frame) {
         if self.recycled_frames.len() < FRAME_POOL_LIMIT {
             self.recycled_frames.push(frame);
         }
     }
 
+    #[inline(always)]
     fn pop_recycled_frame_for_program_ptr(
         &mut self,
         program_ptr: *const Program,
@@ -2778,6 +2771,7 @@ impl ExecutionState {
         Some(self.recycled_frames.swap_remove(idx))
     }
 
+    #[inline(always)]
     fn local_program_ptr(module: &Instance, funcidx: u32) -> Result<*const Program, Fault> {
         if funcidx < module.num_imported_functions {
             return Err(Fault::GlobalIndexOutOfBounds);
@@ -2960,6 +2954,11 @@ impl ExecutionState {
         &mut self,
         mut ticks_left: usize,
     ) -> Result<RunResult, ExecError> {
+        // Cache current module pointer across same-module dispatch iterations.
+        // This avoids repeated HashMap lookups in tight call-heavy loops.
+        let mut cached_module_id: Option<u32> = None;
+        let mut cached_module_ptr: *mut Instance = std::ptr::null_mut();
+
         loop {
             if self.frame_stack.is_empty() {
                 return Ok(RunResult::Complete);
@@ -2968,44 +2967,58 @@ impl ExecutionState {
                 return Ok(RunResult::Paused);
             }
 
-            let (current_module_id, _) = self.frame_stack.last().unwrap();
-            let current_module_id = *current_module_id;
+            'execute_current: loop {
+                let (current_module_id, _) = self.frame_stack.last().unwrap();
+                let current_module_id = *current_module_id;
 
-            // Execute current frame
-            let result = {
-                let (_, frame) = self.frame_stack.last_mut().unwrap();
-                let module = self.modules.get_mut(&current_module_id).unwrap();
-                if BUDGETED {
-                    execute_module_frame::<true>(
-                        current_module_id,
-                        frame,
-                        module,
-                        ticks_left.saturating_add(1),
-                    )
-                } else {
-                    execute_module_frame::<false>(current_module_id, frame, module, EXEC_TICK_LIMIT)
-                }
-            };
-
-            let (mut continuation, ticks_used) = match result {
-                Ok((continuation, ticks_used)) => (continuation, ticks_used),
-                Err(Fault::OutOfTicks) if BUDGETED => {
-                    return Ok(RunResult::Paused);
-                }
-                Err(fault) => {
-                    if let Some((_, frame)) = self.frame_stack.pop() {
-                        self.recycle_frame(frame);
+                // Execute current frame
+                let result = {
+                    if cached_module_id != Some(current_module_id) || cached_module_ptr.is_null() {
+                        let module = self.modules.get_mut(&current_module_id).unwrap();
+                        cached_module_ptr = module as *mut Instance;
+                        cached_module_id = Some(current_module_id);
                     }
-                    return Err(ExecError::ExecutionFault(fault));
+                    let (_, frame) = self.frame_stack.last_mut().unwrap();
+                    // SAFETY: `cached_module_ptr` comes from `self.modules.get_mut`.
+                    // It remains valid until the modules map is structurally modified.
+                    // We invalidate the cache before any such mutation.
+                    let module = unsafe { &mut *cached_module_ptr };
+                    if BUDGETED {
+                        execute_module_frame::<true>(
+                            current_module_id,
+                            frame,
+                            module,
+                            ticks_left.saturating_add(1),
+                        )
+                    } else {
+                        execute_module_frame::<false>(
+                            current_module_id,
+                            frame,
+                            module,
+                            EXEC_TICK_LIMIT,
+                        )
+                    }
+                };
+
+                let (mut continuation, ticks_used) = match result {
+                    Ok((continuation, ticks_used)) => (continuation, ticks_used),
+                    Err(Fault::OutOfTicks) if BUDGETED => {
+                        return Ok(RunResult::Paused);
+                    }
+                    Err(fault) => {
+                        if let Some((_, frame)) = self.frame_stack.pop() {
+                            self.recycle_frame(frame);
+                        }
+                        return Err(ExecError::ExecutionFault(fault));
+                    }
+                };
+
+                if BUDGETED {
+                    ticks_left = ticks_left.saturating_sub(ticks_used);
                 }
-            };
 
-            if BUDGETED {
-                ticks_left = ticks_left.saturating_sub(ticks_used);
-            }
-
-            // Handle continuations in a loop to support recursive calls
-            loop {
+                // Handle continuations in a loop to support recursive calls
+                loop {
                 match continuation {
                     Continuation::ProgramEnd | Continuation::DoneReturn => {
                         // Handle function return
@@ -3016,10 +3029,22 @@ impl ExecutionState {
                         if let Some((_, caller_frame)) = self.frame_stack.last_mut() {
                             match return_types.as_slice() {
                                 [] => {}
+                                [ValueType::Unit] => {}
                                 [rt] => {
-                                    let val = Value::pop_raw_from(*rt, &mut completed_frame.stack)
-                                        .map_err(ExecError::ExecutionFault)?;
-                                    Value::push_raw_to(*rt, val, &mut caller_frame.stack);
+                                    let val = if *rt == ValueType::V128 {
+                                        Value::pop_raw_from(*rt, &mut completed_frame.stack)
+                                            .map_err(ExecError::ExecutionFault)?
+                                    } else {
+                                        completed_frame
+                                            .stack
+                                            .pop_u64()
+                                            .map_err(ExecError::ExecutionFault)?
+                                    };
+                                    if *rt == ValueType::V128 {
+                                        Value::push_raw_to(*rt, val, &mut caller_frame.stack);
+                                    } else {
+                                        caller_frame.stack.push_u64(val);
+                                    }
                                 }
                                 _ => {
                                     completed_frame
@@ -3045,9 +3070,17 @@ impl ExecutionState {
                             final_values.clear();
                             match return_types.as_slice() {
                                 [] => {}
+                                [ValueType::Unit] => {}
                                 [rt] => {
-                                    let val = Value::pop_raw_from(*rt, &mut completed_frame.stack)
-                                        .map_err(ExecError::ExecutionFault)?;
+                                    let val = if *rt == ValueType::V128 {
+                                        Value::pop_raw_from(*rt, &mut completed_frame.stack)
+                                            .map_err(ExecError::ExecutionFault)?
+                                    } else {
+                                        completed_frame
+                                            .stack
+                                            .pop_u64()
+                                            .map_err(ExecError::ExecutionFault)?
+                                    };
                                     final_values.push(Value::from_raw(*rt, val));
                                 }
                                 _ => {
@@ -3071,41 +3104,52 @@ impl ExecutionState {
                             return Ok(RunResult::Complete);
                         }
                         self.recycle_frame(completed_frame);
-                        break; // Exit continuation loop to continue main execution loop
+                        break; // Exit continuation loop to continue outer execution loop
                     }
                     Continuation::Call(funcidx) => {
                         // Function call - check if it's imported or local
-                        let module_ptr = {
-                            let module = self.modules.get(&current_module_id).unwrap();
-                            module as *const Instance
-                        };
+                        // SAFETY: `cached_module_ptr` points at `current_module_id` instance.
+                        let module_ptr = cached_module_ptr as *const Instance;
                         let module = unsafe { &*module_ptr };
 
                         if module.num_imported_functions == 0 {
                             // Common hot path: module has no imports, so all calls are local.
-                            let target_program_ptr =
-                                Self::local_program_ptr(module, funcidx)
-                                    .map_err(ExecError::ExecutionFault)?;
+                            let local_idx = funcidx as usize;
+                            if local_idx >= module.programs.len() {
+                                return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
+                            }
+                            let target_program_ptr = Rc::as_ptr(unsafe {
+                                module.programs.get_unchecked(local_idx)
+                            });
                             let recycled_frame =
                                 self.pop_recycled_frame_for_program_ptr(target_program_ptr);
                             let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                             let module = unsafe { &*module_ptr };
                             let frame = if let Some(mut frame) = recycled_frame {
-                                module
-                                    .refill_frame_for_funcidx_from_stack(
-                                        funcidx,
+                                unsafe {
+                                    module.refill_frame_for_local_idx_from_stack_unchecked(
+                                        local_idx,
                                         &mut current_frame.stack,
                                         &mut frame,
                                     )
-                                    .map_err(ExecError::ExecutionFault)?;
+                                }
+                                .map_err(ExecError::ExecutionFault)?;
                                 frame
                             } else {
-                                module
-                                    .frame_for_funcidx_from_stack(funcidx, &mut current_frame.stack)
-                                    .map_err(ExecError::ExecutionFault)?
+                                unsafe {
+                                    module.frame_for_local_idx_from_stack_unchecked(
+                                        local_idx,
+                                        &mut current_frame.stack,
+                                    )
+                                }
+                                .map_err(ExecError::ExecutionFault)?
                             };
                             self.frame_stack.push((current_module_id, frame));
-                            break;
+                            // Fast path: directly execute callee without bouncing to outer loop.
+                            if BUDGETED && ticks_left == 0 {
+                                return Ok(RunResult::Paused);
+                            }
+                            continue 'execute_current;
                         } else if funcidx < module.num_imported_functions {
                             // This is an imported function - dispatch via continuation
                             let imported_func = module
@@ -3169,7 +3213,11 @@ impl ExecutionState {
                                     .map_err(ExecError::ExecutionFault)?
                             };
                             self.frame_stack.push((current_module_id, frame));
-                            break; // Exit continuation loop to continue main execution loop
+                            // Fast path: directly execute callee without bouncing to outer loop.
+                            if BUDGETED && ticks_left == 0 {
+                                return Ok(RunResult::Paused);
+                            }
+                            continue 'execute_current;
                         }
                     }
                     Continuation::CallExternal {
@@ -3178,6 +3226,10 @@ impl ExecutionState {
                         expected_type,
                     } => {
                         // Inter-module call
+                        // This path may materialize detached modules, which can rehash `self.modules`.
+                        // Invalidate cached raw pointers before potential map mutation.
+                        cached_module_id = None;
+                        cached_module_ptr = std::ptr::null_mut();
                         let target_module_key = self
                             .ensure_runtime_module_available(module_id)
                             .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
@@ -3275,7 +3327,7 @@ impl ExecutionState {
                                     .map_err(ExecError::ExecutionFault)?
                             };
                             self.frame_stack.push((target_module_key, frame));
-                            break; // Exit continuation loop to continue main execution loop
+                            break; // Exit continuation loop to continue outer execution loop
                         }
                     }
                     Continuation::CallHost(host_func) => {
@@ -3301,9 +3353,12 @@ impl ExecutionState {
                     }
                 }
             }
+                break 'execute_current;
+            }
         }
     }
 
+    #[inline(always)]
     fn run_with_tick_budget(&mut self, remaining_ticks: Option<usize>) -> Result<RunResult, ExecError> {
         match remaining_ticks {
             Some(ticks) => self.run_core::<true>(ticks),
