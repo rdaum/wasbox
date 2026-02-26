@@ -13,6 +13,8 @@
 
 use crate::exec::Fault;
 use crate::Memory;
+use std::cell::UnsafeCell;
+use std::rc::Rc;
 
 /// Growable memory backed by a vector.
 /// VectorMemory is Clone so that the memory can be fully copied when a new execution on a pre-linked
@@ -21,7 +23,7 @@ use crate::Memory;
 ///   clone the memory.
 pub struct VectorMemory {
     max_bounds: Option<usize>,
-    data: Vec<u8>,
+    data: Rc<UnsafeCell<Vec<u8>>>,
 }
 
 impl Clone for VectorMemory {
@@ -37,26 +39,30 @@ impl VectorMemory {
     pub fn new(min_size: usize, max_bounds: Option<usize>) -> Self {
         VectorMemory {
             max_bounds,
-            data: vec![0; min_size],
+            data: Rc::new(UnsafeCell::new(vec![0; min_size])),
         }
     }
 
     pub fn data_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.data
+        // Shared backing storage is required for imported memories.
+        unsafe { &mut *self.data.get() }
     }
 }
 
 impl Memory for VectorMemory {
     fn data(&self) -> &[u8] {
-        &self.data
+        // Shared backing storage is required for imported memories.
+        unsafe { &*self.data.get() }
     }
 
     fn data_mut(&mut self) -> &mut [u8] {
-        &mut self.data
+        // Shared backing storage is required for imported memories.
+        unsafe { &mut *self.data.get() }
     }
 
     fn size(&self) -> usize {
-        self.data.len()
+        // Shared backing storage is required for imported memories.
+        unsafe { (&*self.data.get()).len() }
     }
     fn grow(&mut self, new_size: usize) -> Result<usize, Fault> {
         if let Some(max) = self.max_bounds {
@@ -70,7 +76,9 @@ impl Memory for VectorMemory {
             return Err(Fault::CannotGrowMemory);
         }
 
-        self.data.resize(new_size, 0);
-        Ok(self.data.len())
+        // Shared backing storage is required for imported memories.
+        let data = unsafe { &mut *self.data.get() };
+        data.resize(new_size, 0);
+        Ok(data.len())
     }
 }

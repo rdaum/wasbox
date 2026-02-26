@@ -232,7 +232,9 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 prg.push(Op::Else);
             }
             OpCode::End => {
-                let block = scope_stack.pop().unwrap();
+                let Some(block) = scope_stack.pop() else {
+                    return Err(DecodeError::FailedToDecode("unexpected end".to_string()));
+                };
 
                 // Always push an EndScope.
                 prg.push(Op::EndScope(block.scope_type));
@@ -890,6 +892,15 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                     5 => prg.push(Op::I64TruncSatF32U),
                     6 => prg.push(Op::I64TruncSatF64S),
                     7 => prg.push(Op::I64TruncSatF64U),
+                    12 => {
+                        let elem_idx = reader.load_imm_varuint32()?;
+                        let table_idx = reader.load_imm_varuint32()?;
+                        prg.push(Op::TableInit(table_idx, elem_idx));
+                    }
+                    13 => {
+                        let elem_idx = reader.load_imm_varuint32()?;
+                        prg.push(Op::ElemDrop(elem_idx));
+                    }
                     _ => {
                         return Err(DecodeError::UnimplementedOpcode(
                             sub_opcode as u8,
@@ -917,6 +928,10 @@ pub fn decode(program_stream: &[u8]) -> Result<Program, DecodeError> {
                 ));
             }
         }
+    }
+
+    if !scope_stack.is_empty() {
+        return Err(DecodeError::FailedToDecode("unexpected end".to_string()));
     }
 
     Ok(prg)

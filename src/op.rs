@@ -58,6 +58,8 @@ pub enum Op {
     // Table operations
     TableGet(u32),
     TableSet(u32),
+    TableInit(u32, u32), // (table_idx, elem_idx)
+    ElemDrop(u32),       // elem_idx
 
     // Loads.
     LoadI32(MemArg),

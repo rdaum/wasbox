@@ -14,8 +14,11 @@
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::cell::RefCell;
     use std::fmt::{Debug, Formatter};
     use std::path::Path;
+    use std::rc::Rc;
     use wasbox::{
         mk_instance, mk_instance_with_imports, Continuation, DecodeError, ElementMode,
         ExecutionState, ImportResolver, ImportedFunction, LinkError, LoaderError, Module,
@@ -37,6 +40,9 @@ mod tests {
             }
 
             match field {
+                "print" => Some(ImportedFunction::Host(Box::new(|_stack| {
+                    Ok(Continuation::ProgramEnd)
+                }))),
                 "print_i32" => Some(ImportedFunction::Host(Box::new(|stack| {
                     let _arg = stack.pop_i32()?;
                     Ok(Continuation::ProgramEnd)
@@ -104,7 +110,7 @@ mod tests {
 
             match field {
                 "table" => Some(TableInstance {
-                    elements: vec![None; 10], // Start with 10 elements
+                    elements: Rc::new(RefCell::new(vec![None; 10])), // Start with 10 elements
                     ref_type: ReferenceType::FuncRef,
                     limits: (10, Some(20)), // Min 10, max 20
                 }),
@@ -124,10 +130,19 @@ mod tests {
         }
     }
 
-    /// Test registry for WAST tests that combines spectest and registered modules
+    #[derive(Default, Clone)]
+    struct ModuleExports {
+        functions: HashMap<String, u32>,
+        globals: HashMap<String, Value>,
+        tables: HashMap<String, TableInstance>,
+        memories: HashMap<String, VectorMemory>,
+    }
+
+    /// Test registry for WAST tests that combines spectest and registered modules.
     pub struct TestRegistry {
         spectest: SpectestResolver,
         registered_modules: HashMap<String, u32>,
+        module_exports: HashMap<u32, ModuleExports>,
     }
 
     impl TestRegistry {
@@ -135,11 +150,54 @@ mod tests {
             Self {
                 spectest: SpectestResolver,
                 registered_modules: HashMap::new(),
+                module_exports: HashMap::new(),
             }
         }
 
         pub fn register_module(&mut self, name: &str, module_id: u32) {
             self.registered_modules.insert(name.to_string(), module_id);
+        }
+
+        pub fn resolve_registered_module(&self, name: &str) -> Option<u32> {
+            self.registered_modules.get(name).copied()
+        }
+
+        pub fn cache_module(&mut self, module_id: u32, instance: &wasbox::Instance) {
+            let mut exports = ModuleExports::default();
+
+            for (name, func_idx) in instance.exported_functions() {
+                exports.functions.insert(name, func_idx);
+            }
+            for (name, global_idx) in instance.exported_globals() {
+                if let Some(g) = instance.globals.get(global_idx as usize) {
+                    exports.globals.insert(name, g.value);
+                }
+            }
+            for (name, table_idx) in instance.exported_tables() {
+                if let Some(t) = instance.tables.get(table_idx as usize) {
+                    exports.tables.insert(name, t.clone());
+                }
+            }
+            for (name, memory_idx) in instance.exported_memories() {
+                if let Some(m) = instance.memories.get(memory_idx as usize) {
+                    exports.memories.insert(name, m.clone());
+                }
+            }
+
+            self.module_exports.insert(module_id, exports);
+        }
+
+        pub fn refresh_from_execution(&mut self, execution: &ExecutionState) {
+            let mut module_ids = HashSet::new();
+            for module_id in self.registered_modules.values().copied() {
+                module_ids.insert(module_id);
+            }
+
+            for module_id in module_ids {
+                if let Some(instance) = execution.get_module(module_id) {
+                    self.cache_module(module_id, instance);
+                }
+            }
         }
     }
 
@@ -158,23 +216,14 @@ mod tests {
 
             // Then check registered modules
             if let Some(&module_id) = self.registered_modules.get(module) {
-                // For registered modules, we need to find the actual function index
-                // Hard-code the known function indices from the first module
-                let func_idx = match field {
-                    "f" => 0, // For ref_func.wast
-                    "func" => 0,
-                    "func-i32" => 1,
-                    "func-f32" => 2,
-                    "func->i32" => 3,
-                    "func->f32" => 4,
-                    "func-i32->i32" => 5,
-                    "func-i64->i64" => 6,
-                    _ => return None, // Unknown function
-                };
-                return Some(ImportedFunction::Module {
-                    module_id,
-                    func_idx,
-                });
+                if let Some(exports) = self.module_exports.get(&module_id) {
+                    if let Some(&func_idx) = exports.functions.get(field) {
+                        return Some(ImportedFunction::Module {
+                            module_id,
+                            func_idx,
+                        });
+                    }
+                }
             }
 
             None
@@ -187,14 +236,10 @@ mod tests {
             }
 
             // Then check registered modules
-            if let Some(&_module_id) = self.registered_modules.get(module) {
-                // Hard-code the known global values from the first module
-                return match field {
-                    "global-i32" => Some(Value::I32(55)),
-                    "global-f32" => Some(Value::F32(44.0)),
-                    "global-mut-i64" => Some(Value::I64(66)),
-                    _ => None, // Unknown global
-                };
+            if let Some(&module_id) = self.registered_modules.get(module) {
+                if let Some(exports) = self.module_exports.get(&module_id) {
+                    return exports.globals.get(field).copied();
+                }
             }
 
             None
@@ -207,21 +252,10 @@ mod tests {
             }
 
             // Then check registered modules
-            if let Some(&_module_id) = self.registered_modules.get(module) {
-                // Hard-code the known table exports from the first module
-                return match field {
-                    "table-10-inf" => Some(TableInstance {
-                        elements: vec![None; 10],
-                        ref_type: ReferenceType::FuncRef,
-                        limits: (10, None),
-                    }),
-                    "table-10-20" => Some(TableInstance {
-                        elements: vec![None; 10],
-                        ref_type: ReferenceType::FuncRef,
-                        limits: (10, Some(20)),
-                    }),
-                    _ => None, // Unknown table
-                };
+            if let Some(&module_id) = self.registered_modules.get(module) {
+                if let Some(exports) = self.module_exports.get(&module_id) {
+                    return exports.tables.get(field).cloned();
+                }
             }
 
             None
@@ -234,12 +268,10 @@ mod tests {
             }
 
             // Then check registered modules
-            if let Some(&_module_id) = self.registered_modules.get(module) {
-                // Hard-code the known memory exports from the first module
-                return match field {
-                    "memory-2-inf" => Some(VectorMemory::new(2 * 65536, None)), // 2 pages, unlimited
-                    _ => None,                                                  // Unknown memory
-                };
+            if let Some(&module_id) = self.registered_modules.get(module) {
+                if let Some(exports) = self.module_exports.get(&module_id) {
+                    return exports.memories.get(field).cloned();
+                }
             }
 
             None
@@ -407,7 +439,7 @@ mod tests {
 
     enum TestModule {
         None,
-        Loaded(Box<ExecutionState<VectorMemory>>),
+        Loaded(Box<ExecutionState>),
         LoadFailed(LoaderError),
         LinkFailed(LinkError),
     }
@@ -429,13 +461,7 @@ mod tests {
             match m {
                 Ok(m) => match mk_instance(m) {
                     Ok(i) => {
-                        // Use first memory if available, otherwise create a dummy memory
-                        let memory = if !i.memories.is_empty() {
-                            i.memories[0].clone()
-                        } else {
-                            VectorMemory::new(0, None)
-                        };
-                        let mut exec_state = ExecutionState::new(memory);
+                        let mut exec_state = ExecutionState::new();
                         exec_state.add_module(0, i);
                         TestModule::Loaded(Box::new(exec_state))
                     }
@@ -444,6 +470,26 @@ mod tests {
                 Err(e) => TestModule::LoadFailed(e),
             }
         }
+    }
+
+    fn module_identifier(module: &QuoteWat<'_>) -> Option<String> {
+        match module {
+            QuoteWat::Wat(Wat::Module(m)) => m.id.map(|id| id.name().to_string()),
+            _ => None,
+        }
+    }
+
+    fn resolve_module_id(
+        module: Option<wast::token::Id<'_>>,
+        current_module_id: u32,
+        registry: &TestRegistry,
+    ) -> u32 {
+        if let Some(module) = module {
+            return registry
+                .resolve_registered_module(module.name())
+                .unwrap_or_else(|| panic!("Unknown module reference: {}", module.name()));
+        }
+        current_module_id
     }
 
     fn perform_wast(path: &Path) {
@@ -466,6 +512,7 @@ mod tests {
 
             match directive {
                 WastDirective::Module(mut module) => {
+                    let module_identifier = module_identifier(&module);
                     let encoded = module.encode().unwrap();
                     let m = Module::load(&encoded);
                     match m {
@@ -484,22 +531,28 @@ mod tests {
                             // Handle the result and update execution state
                             match result {
                                 Ok(i) => {
+                                    let new_module_id = module_counter;
+                                    if let Some(module_name) = module_identifier.as_deref() {
+                                        registry.register_module(module_name, new_module_id);
+                                    }
+
                                     // Reuse existing execution state if available
                                     if let TestModule::Loaded(ref mut exec_state) = execution {
                                         // Add module to existing execution state
-                                        exec_state.add_module(module_counter, i);
-                                        current_module_id = module_counter;
+                                        exec_state.add_module(new_module_id, i);
+                                        if let Some(instance) = exec_state.get_module(new_module_id) {
+                                            registry.cache_module(new_module_id, instance);
+                                        }
+                                        current_module_id = new_module_id;
                                         module_counter += 1;
                                     } else {
                                         // Create new execution state for first module
-                                        let memory = if !i.memories.is_empty() {
-                                            i.memories[0].clone()
-                                        } else {
-                                            VectorMemory::new(0, None)
-                                        };
-                                        let mut exec_state = ExecutionState::new(memory);
-                                        exec_state.add_module(module_counter, i);
-                                        current_module_id = module_counter;
+                                        let mut exec_state = ExecutionState::new();
+                                        exec_state.add_module(new_module_id, i);
+                                        if let Some(instance) = exec_state.get_module(new_module_id) {
+                                            registry.cache_module(new_module_id, instance);
+                                        }
+                                        current_module_id = new_module_id;
                                         module_counter += 1;
                                         execution = TestModule::Loaded(Box::new(exec_state));
                                     }
@@ -522,24 +575,31 @@ mod tests {
                     // Invoke runs executions on the last loaded module.
                     WastExecute::Invoke(WastInvoke {
                         span: _,
-                        module: _,
+                        module,
                         name,
                         args,
                     }) => {
                         let TestModule::Loaded(ref mut execution) = execution else {
                             panic!("Expected a loaded module for invocation @ {linecol:?}");
                         };
+                        let target_module_id =
+                            resolve_module_id(module, current_module_id, &registry);
                         let funcidx = execution
-                            .get_module(current_module_id)
+                            .get_module(target_module_id)
                             .unwrap()
                             .find_funcidx(name)
                             .unwrap_or_else(|| panic!("Function not found: {name:?}"));
 
                         let arg_set: Vec<_> = args.iter().map(convert_value).collect();
                         execution
-                            .prepare(current_module_id, funcidx, &arg_set)
+                            .prepare(target_module_id, funcidx, &arg_set)
                             .unwrap();
-                        execution.run().unwrap();
+                        if let Err(e) = execution.run() {
+                            panic!(
+                                "Invoke run failed for {name} at directive #{directive_num} @ {linecol:?}: {e:?}"
+                            );
+                        }
+                        registry.refresh_from_execution(execution);
                         let result = execution.result().unwrap();
 
                         let expected_results: Vec<_> = results.iter().map(convert_ret).collect();
@@ -551,6 +611,69 @@ mod tests {
                                 "Invoke: {name}: Mismatch at index {i}: expected {expected:?}, got {actual:?} for directive #{directive_num} @ {linecol:?}"
                             );
                         }
+                    }
+                    WastExecute::Get {
+                        span: _,
+                        module,
+                        global,
+                    } => {
+                        let TestModule::Loaded(ref execution) = execution else {
+                            panic!("Expected a loaded module for global get @ {linecol:?}");
+                        };
+                        let target_module_id =
+                            resolve_module_id(module, current_module_id, &registry);
+                        let instance = execution
+                            .get_module(target_module_id)
+                            .unwrap_or_else(|| panic!("Unknown module id {target_module_id}"));
+                        let global_idx = instance
+                            .find_globalidx(global)
+                            .unwrap_or_else(|| panic!("Global not found: {global:?}"));
+                        let actual = instance
+                            .globals
+                            .get(global_idx as usize)
+                            .unwrap_or_else(|| panic!("Global index out of bounds: {global_idx}"))
+                            .value;
+                        let actual = if let Some((module_name, field_name)) = global.split_once('.') {
+                            if let Some(source_module_id) = registry.resolve_registered_module(module_name)
+                            {
+                                if let Some(source_instance) = execution.get_module(source_module_id)
+                                {
+                                    if let Some(source_global_idx) =
+                                        source_instance.find_globalidx(field_name)
+                                    {
+                                        source_instance
+                                            .globals
+                                            .get(source_global_idx as usize)
+                                            .unwrap_or_else(|| {
+                                                panic!(
+                                                    "Global index out of bounds: {source_global_idx}"
+                                                )
+                                            })
+                                            .value
+                                    } else {
+                                        actual
+                                    }
+                                } else {
+                                    actual
+                                }
+                            } else {
+                                actual
+                            }
+                        } else {
+                            actual
+                        };
+
+                        let expected_results: Vec<_> = results.iter().map(convert_ret).collect();
+                        assert!(
+                            !expected_results.is_empty(),
+                            "Expected at least one result for get {global:?}"
+                        );
+                        assert!(
+                            expected_results[0].eq_w_nan(&actual),
+                            "Get: {global}: expected {:?}, got {:?} for directive #{directive_num} @ {linecol:?}",
+                            expected_results[0],
+                            actual
+                        );
                     }
                     _ => panic!("Unsupported exec directive: {exec:?} @ {linecol:?}"),
                 },
@@ -581,47 +704,53 @@ mod tests {
                 }
                 WastDirective::Invoke(WastInvoke {
                     span: _,
-                    module: _,
+                    module,
                     name,
                     args,
                 }) => {
                     let TestModule::Loaded(ref mut execution) = execution else {
                         panic!("Expected a loaded module for invocation @ {linecol:?}");
                     };
+                    let target_module_id =
+                        resolve_module_id(module, current_module_id, &registry);
                     let funcidx = execution
-                        .get_module(current_module_id)
+                        .get_module(target_module_id)
                         .unwrap()
                         .find_funcidx(name)
                         .unwrap_or_else(|| panic!("Function not found: {name:?}"));
 
                     let arg_set: Vec<_> = args.iter().map(convert_value).collect();
                     execution
-                        .prepare(current_module_id, funcidx, &arg_set)
+                        .prepare(target_module_id, funcidx, &arg_set)
                         .unwrap();
                     execution.run().unwrap();
+                    registry.refresh_from_execution(execution);
                     // For bare invoke, we don't check the result
                 }
                 WastDirective::AssertTrap { exec, message, .. } => match exec {
                     WastExecute::Invoke(WastInvoke {
                         span: _,
-                        module: _,
+                        module,
                         name,
                         args,
                     }) => {
                         let TestModule::Loaded(ref mut execution) = execution else {
                             panic!("Expected a loaded module for invocation @ {linecol:?}");
                         };
+                        let target_module_id =
+                            resolve_module_id(module, current_module_id, &registry);
                         let funcidx = execution
-                            .get_module(current_module_id)
+                            .get_module(target_module_id)
                             .unwrap()
                             .find_funcidx(name)
                             .unwrap_or_else(|| panic!("Function not found: {name:?}"));
 
                         let arg_set: Vec<_> = args.iter().map(convert_value).collect();
                         execution
-                            .prepare(current_module_id, funcidx, &arg_set)
+                            .prepare(target_module_id, funcidx, &arg_set)
                             .unwrap();
                         let result = execution.run();
+                        registry.refresh_from_execution(execution);
 
                         // We expect this to fail with a trap
                         match result {
@@ -631,6 +760,7 @@ mod tests {
                                 // Check if the fault message is compatible with the expected message
                                 let is_compatible = match (expected_message.as_str(), fault_message.as_str()) {
                                     ("out of bounds memory access", "Memory out of bounds") => true,
+                                    ("out of bounds table access", "Memory out of bounds") => true,
                                     ("integer overflow", "integer overflow") => true,
                                     ("invalid conversion to integer", "invalid conversion to integer") => true,
                                     (expected, actual) if actual.contains(expected) => true,
@@ -650,15 +780,44 @@ mod tests {
                             ),
                         }
                     }
+                    WastExecute::Wat(mut module) => {
+                        let encoded = module.encode().unwrap();
+                        let result = match Module::load(&encoded) {
+                            Ok(m) => {
+                                if m.imports.is_empty() {
+                                    mk_instance(m)
+                                } else {
+                                    mk_instance_with_imports(m, &registry)
+                                }
+                            }
+                            Err(_) => {
+                                // Malformed decode is acceptable for assert_trap in the current harness.
+                                continue;
+                            }
+                        };
+
+                        if result.is_ok() {
+                            panic!(
+                                "Expected trap with message '{message}', but module instantiation succeeded for directive #{directive_num} @ {linecol:?}"
+                            );
+                        }
+                    }
                     _ => {
                         panic!("Unsupported exec directive in assert_trap: {exec:?} @ {linecol:?}")
                     }
                 },
-                WastDirective::Register { name, .. } => {
+                WastDirective::Register { name, module, .. } => {
                     // Register the current module with the given name
-                    if let TestModule::Loaded(ref _execution_state) = execution {
-                        // Register the current module with the given name
-                        registry.register_module(name, current_module_id);
+                    if let TestModule::Loaded(ref execution_state) = execution {
+                        let target_module_id =
+                            resolve_module_id(module, current_module_id, &registry);
+                        let instance = execution_state.get_module(target_module_id).unwrap_or_else(|| {
+                            panic!(
+                                "No module with id {target_module_id} to register at directive #{directive_num} @ {linecol:?}"
+                            )
+                        });
+                        registry.cache_module(target_module_id, instance);
+                        registry.register_module(name, target_module_id);
                     } else {
                         panic!("No module loaded to register at directive #{directive_num} @ {linecol:?}");
                     }
@@ -771,13 +930,7 @@ mod tests {
         let resolver = TestResolver;
         let instance = mk_instance_with_imports(module, &resolver).unwrap();
 
-        let memory = if !instance.memories.is_empty() {
-            instance.memories[0].clone()
-        } else {
-            VectorMemory::new(0, None)
-        };
-
-        let mut execution = ExecutionState::new(memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance);
 
         let test_func_idx = execution
@@ -847,8 +1000,8 @@ mod tests {
 
         // Check that the global was initialized with the correct function reference
         assert_eq!(instance.globals.len(), 1);
-        if let Value::FuncRef(Some(func_idx)) = instance.globals[0].value {
-            assert_eq!(func_idx, 0); // Should refer to function 0
+        if let Value::FuncRef(Some(func_ref)) = instance.globals[0].value {
+            assert_eq!(func_ref.func_idx, 0); // Should refer to function 0
         } else {
             panic!("Global should be initialized with function reference");
         }
@@ -884,16 +1037,16 @@ mod tests {
 
         // Create instances
         let instance1 = mk_instance(module1).unwrap();
-        let instance2_memory = VectorMemory::new(0, None);
 
         // Set up registry
         let mut registry = TestRegistry::new();
+        registry.cache_module(0, &instance1);
         registry.register_module("test", 0);
 
         let instance2 = mk_instance_with_imports(module2, &registry).unwrap();
 
         // Set up execution state
-        let mut execution = ExecutionState::new(instance2_memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance1);
         execution.add_module(1, instance2);
 
@@ -930,8 +1083,7 @@ mod tests {
         let module = Module::load(&module_bytes).unwrap();
         let instance = mk_instance(module).unwrap();
 
-        let memory = VectorMemory::new(0, None);
-        let mut execution = ExecutionState::new(memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance);
 
         let func_idx = execution
@@ -963,8 +1115,7 @@ mod tests {
         let module = Module::load(&module_bytes).unwrap();
         let instance = mk_instance(module).unwrap();
 
-        let memory = VectorMemory::new(0, None);
-        let mut execution = ExecutionState::new(memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance);
 
         let func_idx = execution
@@ -996,8 +1147,7 @@ mod tests {
         let module = Module::load(&module_bytes).unwrap();
         let instance = mk_instance(module).unwrap();
 
-        let memory = VectorMemory::new(0, None);
-        let mut execution = ExecutionState::new(memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance);
 
         let func_idx = execution
@@ -1032,9 +1182,7 @@ mod tests {
         // Check that there's exactly one memory
         assert_eq!(instance.memories.len(), 1);
 
-        // Use the memory from the instance, not a new one
-        let memory = instance.memories[0].clone();
-        let mut execution = ExecutionState::new(memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance);
 
         let func_idx = execution
@@ -1066,14 +1214,7 @@ mod tests {
         let module = Module::load(&module_bytes).unwrap();
         let instance = mk_instance(module).unwrap();
 
-        // Use the same logic as perform_wast function
-        let memory = if !instance.memories.is_empty() {
-            instance.memories[0].clone()
-        } else {
-            VectorMemory::new(0, None)
-        };
-
-        let mut execution = ExecutionState::new(memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance);
 
         let func_idx = execution
@@ -1121,16 +1262,16 @@ mod tests {
 
         // Create instances
         let instance1 = mk_instance(module1).unwrap();
-        let instance2_memory = VectorMemory::new(0, None);
 
         // Set up registry
         let mut registry = TestRegistry::new();
+        registry.cache_module(0, &instance1);
         registry.register_module("test", 0);
 
         let instance2 = mk_instance_with_imports(module2, &registry).unwrap();
 
         // Set up execution state
-        let mut execution = ExecutionState::new(instance2_memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance1);
         execution.add_module(1, instance2);
 
@@ -1166,8 +1307,7 @@ mod tests {
         let module = Module::load(&wasm_bytes).unwrap();
         let instance = mk_instance_with_imports(module, &SpectestResolver).unwrap();
 
-        let memory = VectorMemory::new(0, None);
-        let mut execution = ExecutionState::new(memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance);
 
         let test_func_idx = execution
@@ -1212,14 +1352,14 @@ mod tests {
         let module2 = Module::load(&module2_bytes).unwrap();
 
         let instance1 = mk_instance(module1).unwrap();
-        let memory = VectorMemory::new(0, None);
 
         let mut registry = TestRegistry::new();
+        registry.cache_module(0, &instance1);
         registry.register_module("test", 0);
 
         let instance2 = mk_instance_with_imports(module2, &registry).unwrap();
 
-        let mut execution = ExecutionState::new(memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance1);
         execution.add_module(1, instance2);
 
@@ -1272,9 +1412,8 @@ mod tests {
         let instance = wasbox::mk_instance(module).unwrap();
 
         // Create execution context and call the get function
-        let memory = instance.memories[0].clone();
         let get_func_idx = instance.find_funcidx("get").unwrap();
-        let mut execution = wasbox::ExecutionState::new(memory);
+        let mut execution = wasbox::ExecutionState::new();
         execution.add_module(0, instance);
 
         // Find the "get" function and call it

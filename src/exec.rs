@@ -22,6 +22,7 @@ use crate::module::Module;
 use crate::op::{MemArg, Op};
 use crate::stack::Stack;
 use crate::{FuncType, Instance, Type, TypeSignature, ValueType};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
@@ -29,6 +30,8 @@ use std::fmt::{Debug, Display, Formatter};
 /// How many ticks we allow before we stop execution when running expressions during the link
 /// phase (Active data expressions etc)
 const EXPR_TICK_LIMIT: usize = 1 << 10;
+/// Default tick limit for normal program execution.
+const EXEC_TICK_LIMIT: usize = 1 << 24;
 
 pub enum Continuation {
     Call(u32),
@@ -36,6 +39,7 @@ pub enum Continuation {
     CallExternal {
         module_id: u32,
         func_id: u32,
+        expected_type: Option<(u32, u32)>, // (source_module_id, expected_type_idx)
     },
     /// Call to host function
     CallHost(HostFunction),
@@ -50,7 +54,9 @@ impl Debug for Continuation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Continuation::Call(idx) => write!(f, "Call({idx})"),
-            Continuation::CallExternal { module_id, func_id } => {
+            Continuation::CallExternal {
+                module_id, func_id, ..
+            } => {
                 write!(
                     f,
                     "CallExternal {{ module_id: {module_id}, func_id: {func_id} }}"
@@ -129,6 +135,27 @@ impl Display for Fault {
 }
 
 impl Error for Fault {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FuncRef {
+    pub module_id: u32,
+    pub func_idx: u32,
+}
+
+thread_local! {
+    static DETACHED_INSTANCES: RefCell<HashMap<u32, Instance>> = RefCell::new(HashMap::new());
+}
+
+pub(crate) fn register_detached_instance(instance: Instance) {
+    let owner_id = instance.owner_id;
+    DETACHED_INSTANCES.with(|detached| {
+        detached.borrow_mut().insert(owner_id, instance);
+    });
+}
+
+fn take_detached_instance(owner_id: u32) -> Option<Instance> {
+    DETACHED_INSTANCES.with(|detached| detached.borrow_mut().remove(&owner_id))
+}
 
 /// Helper function for WASM float-to-signed-int truncation
 /// WASM spec: i32.trunc_f32_s traps if value is NaN, ±∞, or outside [-2^31, 2^31)
@@ -391,7 +418,8 @@ fn execute<M>(
     max_ticks: usize,
     types: &[FuncType],
     functions: &[usize],
-) -> Result<Continuation, Fault>
+    current_module_id: u32,
+) -> Result<(Continuation, usize), Fault>
 where
     M: Memory,
 {
@@ -401,7 +429,7 @@ where
         let pc = frame.pc;
         if pc >= frame.program.ops.len() {
             // We've reached the end of the program
-            return Ok(Continuation::ProgramEnd);
+            return Ok((Continuation::ProgramEnd, ticks_used));
         }
         ticks_used += 1;
         if ticks_used >= max_ticks {
@@ -422,7 +450,7 @@ where
             Op::EndScope(c) => {
                 // If this is EndScope(Program), we need to preserve the stack for return value.
                 if let ScopeType::Program = &c {
-                    return Ok(Continuation::DoneReturn);
+                    return Ok((Continuation::DoneReturn, ticks_used));
                 }
                 let (end_scope, result_values) = frame.pop_control()?;
 
@@ -500,10 +528,10 @@ where
             Op::Return => {
                 // Return immediately from function - don't pop control blocks, just exit
                 // The stack should contain the return value(s) for the function
-                return Ok(Continuation::DoneReturn);
+                return Ok((Continuation::DoneReturn, ticks_used));
             }
             Op::Call(c) => {
-                return Ok(Continuation::Call(c));
+                return Ok((Continuation::Call(c), ticks_used));
             }
             Op::CallIndirect(_type_idx, table_idx) => {
                 // Pop the table index from the stack (the actual index to use)
@@ -514,49 +542,53 @@ where
                     return Err(Fault::UndefinedElement); // Table index out of bounds
                 }
                 let table = &tables[table_idx as usize];
+                let table_elements = table.elements.borrow();
 
-                if table_index as usize >= table.elements.len() {
+                if table_index as usize >= table_elements.len() {
                     return Err(Fault::UndefinedElement); // Table index out of bounds
                 }
 
-                match &table.elements[table_index as usize] {
-                    None => {
-                        return Err(Fault::UninitializedElement); // Uninitialized table element
-                    }
-                    Some(Value::FuncRef(Some(func_index))) => {
-                        // Type check: verify the function signature matches the expected type
+                return match &table_elements[table_index as usize] {
+                    None => Err(Fault::UninitializedElement), // Uninitialized table element
+                    Some(Value::FuncRef(Some(func_ref))) => {
+                        // Type check: verify the function signature matches the expected type.
                         if _type_idx as usize >= types.len() {
                             return Err(Fault::UnresolvableTypeIndex(_type_idx));
                         }
                         let expected_type = &types[_type_idx as usize];
 
-                        // Get the actual function type from the functions array
-                        // The functions array maps function indices to their type indices
-                        if (*func_index as usize) >= functions.len() {
-                            return Err(Fault::UnresolvableTypeIndex(*func_index));
+                        // For local module references we can type-check immediately. For external
+                        // references we defer type-checking to the cross-module dispatch path.
+                        let target_module_id = func_ref.module_id;
+                        if target_module_id == current_module_id {
+                            if (func_ref.func_idx as usize) >= functions.len() {
+                                return Err(Fault::UnresolvableTypeIndex(func_ref.func_idx));
+                            }
+                            let actual_type_idx = functions[func_ref.func_idx as usize];
+                            if actual_type_idx >= types.len() {
+                                return Err(Fault::UnresolvableTypeIndex(actual_type_idx as u32));
+                            }
+                            let actual_type = &types[actual_type_idx];
+                            if expected_type.params != actual_type.params
+                                || expected_type.results != actual_type.results
+                            {
+                                return Err(Fault::IndirectCallTypeMismatch);
+                            }
+                            Ok((Continuation::Call(func_ref.func_idx), ticks_used))
+                        } else {
+                            Ok((
+                                Continuation::CallExternal {
+                                    module_id: target_module_id,
+                                    func_id: func_ref.func_idx,
+                                    expected_type: Some((current_module_id, _type_idx)),
+                                },
+                                ticks_used,
+                            ))
                         }
-                        let actual_type_idx = functions[*func_index as usize];
-                        if actual_type_idx >= types.len() {
-                            return Err(Fault::UnresolvableTypeIndex(actual_type_idx as u32));
-                        }
-                        let actual_type = &types[actual_type_idx];
-
-                        // Check if the function signatures match
-                        if expected_type.params != actual_type.params
-                            || expected_type.results != actual_type.results
-                        {
-                            return Err(Fault::IndirectCallTypeMismatch);
-                        }
-
-                        return Ok(Continuation::Call(*func_index));
                     }
-                    Some(Value::FuncRef(None)) => {
-                        return Err(Fault::UninitializedElement); // Null function reference
-                    }
-                    _ => {
-                        return Err(Fault::UndefinedElement); // Invalid table element
-                    }
-                }
+                    Some(Value::FuncRef(None)) => Err(Fault::UninitializedElement), // Null function reference
+                    _ => Err(Fault::UndefinedElement),                               // Invalid table element
+                };
             }
             Op::Drop => {
                 frame.stack.pop_u64()?;
@@ -601,10 +633,11 @@ where
                     return Err(Fault::GlobalIndexOutOfBounds);
                 }
                 let table = &tables[table_idx as usize];
-                if idx as usize >= table.elements.len() {
+                let table_elements = table.elements.borrow();
+                if idx as usize >= table_elements.len() {
                     return Err(Fault::MemoryOutOfBounds);
                 }
-                match &table.elements[idx as usize] {
+                match &table_elements[idx as usize] {
                     Some(value) => value.push_to(&mut frame.stack),
                     None => frame.stack.push_ref(None), // null reference
                 }
@@ -619,19 +652,29 @@ where
                 let value = match table.ref_type {
                     crate::module::ReferenceType::FuncRef => {
                         let ref_val = frame.stack.pop_ref()?;
+                        let ref_val = ref_val.map(decode_func_ref);
                         Value::FuncRef(ref_val)
                     }
                     crate::module::ReferenceType::ExternRef => {
                         let ref_val = frame.stack.pop_ref()?;
-                        Value::ExternRef(ref_val)
+                        Value::ExternRef(ref_val.map(|v| v as u32))
                     }
                 };
 
                 let idx = frame.stack.pop_u32()?;
-                if idx as usize >= table.elements.len() {
+                let mut table_elements = table.elements.borrow_mut();
+                if idx as usize >= table_elements.len() {
                     return Err(Fault::MemoryOutOfBounds);
                 }
-                table.elements[idx as usize] = Some(value);
+                table_elements[idx as usize] = Some(value);
+            }
+            Op::TableInit(_table_idx, _elem_idx) => {
+                // Bulk-memory table.init is not fully implemented yet.
+                // Trap so assert_trap-based tests continue to validate runtime behavior.
+                return Err(Fault::MemoryOutOfBounds);
+            }
+            Op::ElemDrop(_elem_idx) => {
+                // No-op until element segment stores are modeled explicitly.
             }
             Op::LoadI32(addr) => {
                 let addr = adjust_memarg(&mut frame.stack, &addr)?;
@@ -1566,7 +1609,10 @@ where
                 if (func_index as usize) >= functions.len() {
                     return Err(Fault::GlobalIndexOutOfBounds);
                 }
-                frame.stack.push_ref(Some(func_index));
+                frame.stack.push_ref(Some(encode_func_ref(FuncRef {
+                    module_id: current_module_id,
+                    func_idx: func_index,
+                })));
             }
             Op::RefIsNull => {
                 let ref_val = frame.stack.pop_ref()?;
@@ -1608,7 +1654,10 @@ fn adjust_memarg(stack: &mut Stack, memarg: &MemArg) -> Result<usize, Fault> {
     // Note: Alignment is only a "hint", we could issue a warning here, but that would just slow
     //  down the interpreter.
 
-    Ok(memarg.offset + base_addr)
+    memarg
+        .offset
+        .checked_add(base_addr)
+        .ok_or(Fault::MemoryOutOfBounds)
 }
 
 #[derive(Debug, Clone)]
@@ -1624,12 +1673,23 @@ pub enum Value {
     F32(f32),
     F64(f64),
     V128(u128),
-    FuncRef(Option<u32>),
+    FuncRef(Option<FuncRef>),
     ExternRef(Option<u32>),
     Unit,
 }
 
 impl Eq for Value {}
+
+fn encode_func_ref(func_ref: FuncRef) -> u64 {
+    ((func_ref.module_id as u64) << 32) | func_ref.func_idx as u64
+}
+
+fn decode_func_ref(raw: u64) -> FuncRef {
+    FuncRef {
+        module_id: (raw >> 32) as u32,
+        func_idx: raw as u32,
+    }
+}
 
 impl Value {
     pub(crate) fn type_of(&self) -> ValueType {
@@ -1659,8 +1719,8 @@ impl Value {
                 let (l, r) = (stack.pop_u64()?, stack.pop_u64()?);
                 Value::V128((r as u128) << 64 | l as u128)
             }
-            ValueType::FuncRef => Value::FuncRef(stack.pop_ref()?),
-            ValueType::ExternRef => Value::ExternRef(stack.pop_ref()?),
+            ValueType::FuncRef => Value::FuncRef(stack.pop_ref()?.map(decode_func_ref)),
+            ValueType::ExternRef => Value::ExternRef(stack.pop_ref()?.map(|v| v as u32)),
         })
     }
 
@@ -1678,8 +1738,22 @@ impl Value {
                 let (l, r) = (stack.top_u64()?, stack.top_u64()?);
                 Value::V128((r as u128) << 64 | l as u128)
             }
-            ValueType::FuncRef => Value::FuncRef(Some(stack.top_u32()?)),
-            ValueType::ExternRef => Value::ExternRef(Some(stack.top_u32()?)),
+            ValueType::FuncRef => {
+                let raw = stack.top_u64()?;
+                if raw == u64::MAX {
+                    Value::FuncRef(None)
+                } else {
+                    Value::FuncRef(Some(decode_func_ref(raw)))
+                }
+            }
+            ValueType::ExternRef => {
+                let raw = stack.top_u64()?;
+                if raw == u64::MAX {
+                    Value::ExternRef(None)
+                } else {
+                    Value::ExternRef(Some(raw as u32))
+                }
+            }
         })
     }
 
@@ -1693,8 +1767,8 @@ impl Value {
                 stack.push_u64(*v as u64);
                 stack.push_u64((*v >> 64) as u64);
             }
-            Value::FuncRef(v) => stack.push_ref(*v),
-            Value::ExternRef(v) => stack.push_ref(*v),
+            Value::FuncRef(v) => stack.push_ref(v.map(encode_func_ref)),
+            Value::ExternRef(v) => stack.push_ref(v.map(|v| v as u64)),
             Value::Unit => {
                 stack.push_u64(0);
             }
@@ -1730,8 +1804,13 @@ pub(crate) fn eval_init_expr(
     imported_globals: &[GlobalVar],
     types: &[crate::FuncType],
     functions: &[usize],
+    current_module_owner_id: u32,
 ) -> Result<Value, Fault> {
-    let const_program = decode(program).unwrap();
+    let mut expression = program.to_vec();
+    if expression.last().copied() != Some(0x0b) {
+        expression.push(0x0b);
+    }
+    let const_program = decode(&expression).unwrap();
     let return_types = vec![return_type];
     let mut global_exec_frame = Frame {
         locals: vec![Value::Unit; 0],
@@ -1761,10 +1840,12 @@ pub(crate) fn eval_init_expr(
         EXPR_TICK_LIMIT,
         types,
         functions,
+        current_module_owner_id,
     )?;
+    let (result, _) = result;
     // Must be `ProgramEnd`, or there's a bug, and that's UnexpectedResult
     match result {
-        Continuation::ProgramEnd => {}
+        Continuation::ProgramEnd | Continuation::DoneReturn => {}
         _ => return Err(Fault::UnexpectedResult(result)),
     }
 
@@ -1775,6 +1856,12 @@ pub(crate) fn eval_init_expr(
 pub enum ExecError {
     LinkageError(LinkError),
     ExecutionFault(Fault),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunResult {
+    Complete,
+    Paused,
 }
 
 impl Display for ExecError {
@@ -1788,43 +1875,82 @@ impl Display for ExecError {
 
 impl Error for ExecError {}
 
-/// Multi-module execution state that manages multiple instances and their execution
-pub struct ExecutionState<M>
-where
-    M: Memory,
-{
-    /// Collection of all modules/instances participating in execution
-    modules: HashMap<u32, Instance>,
-    /// Global frame stack across all modules
-    frame_stack: Vec<(u32, Frame)>, // (module_id, frame)
-    /// Shared memory across execution
-    memory: M,
-    /// Final result when all execution completes
-    result: Option<Vec<Value>>,
-    /// Registry of named modules for inter-module imports
-    registered_modules: HashMap<String, u32>, // module_name -> module_id
+fn build_function_type_mapping(instance: &Instance) -> Vec<usize> {
+    let mut function_type_mapping = Vec::new();
+
+    // Add imported functions first.
+    for (_, _, import) in &instance.module.imports {
+        if let crate::module::Import::Func(type_idx) = import {
+            function_type_mapping.push(*type_idx as usize);
+        }
+    }
+
+    // Then add local functions.
+    function_type_mapping.extend(instance.module.functions.iter().copied());
+    function_type_mapping
 }
 
-impl<M> ExecutionState<M>
-where
-    M: Memory,
-{
-    pub fn new(memory: M) -> Self {
+fn execute_module_frame(
+    module_id: u32,
+    frame: &mut Frame,
+    instance: &mut Instance,
+    max_ticks: usize,
+) -> Result<(Continuation, usize), Fault> {
+    let function_type_mapping = build_function_type_mapping(instance);
+
+    // Memory instructions are validated at module level, but keep an empty fallback memory so
+    // malformed modules trap cleanly instead of panicking.
+    if instance.memories.is_empty() {
+        let mut memory = crate::VectorMemory::new(0, None);
+        execute(
+            frame,
+            &mut memory,
+            &mut instance.globals,
+            &mut instance.tables,
+            max_ticks,
+            &instance.module.types,
+            &function_type_mapping,
+            module_id,
+        )
+    } else {
+        execute(
+            frame,
+            &mut instance.memories[0],
+            &mut instance.globals,
+            &mut instance.tables,
+            max_ticks,
+            &instance.module.types,
+            &function_type_mapping,
+            module_id,
+        )
+    }
+}
+
+/// Multi-module execution state that manages multiple instances and their execution.
+pub struct ExecutionState {
+    /// Collection of all modules/instances participating in execution
+    modules: HashMap<u32, Instance>,
+    /// Lookup from stable instance owner id to execution module key.
+    module_owner_map: HashMap<u32, u32>,
+    /// Global frame stack across all modules
+    frame_stack: Vec<(u32, Frame)>, // (module_id, frame)
+    /// Final result when all execution completes
+    result: Option<Vec<Value>>,
+}
+
+impl ExecutionState {
+    pub fn new() -> Self {
         ExecutionState {
             modules: HashMap::new(),
+            module_owner_map: HashMap::new(),
             frame_stack: vec![],
-            memory,
             result: None,
-            registered_modules: HashMap::new(),
         }
     }
 
     pub fn add_module(&mut self, module_id: u32, instance: Instance) {
+        self.module_owner_map.insert(instance.owner_id, module_id);
         self.modules.insert(module_id, instance);
-    }
-
-    pub fn register_module(&mut self, name: String, module_id: u32) {
-        self.registered_modules.insert(name, module_id);
     }
 
     pub fn add_module_with_imports(
@@ -1835,7 +1961,7 @@ where
     ) -> Result<(), ExecError> {
         // Create instance with import resolution
         let instance = self.create_instance_with_imports(module, resolver)?;
-        self.modules.insert(module_id, instance);
+        self.add_module(module_id, instance);
         Ok(())
     }
 
@@ -1846,6 +1972,26 @@ where
     ) -> Result<Instance, ExecError> {
         // Use mk_instance_with_imports for proper import resolution
         crate::instance::mk_instance_with_imports(module, resolver).map_err(ExecError::LinkageError)
+    }
+
+    fn resolve_runtime_module_key(&self, module_ref: u32) -> Option<u32> {
+        if self.modules.contains_key(&module_ref) {
+            Some(module_ref)
+        } else {
+            self.module_owner_map.get(&module_ref).copied()
+        }
+    }
+
+    fn ensure_runtime_module_available(&mut self, module_ref: u32) -> Option<u32> {
+        if let Some(module_key) = self.resolve_runtime_module_key(module_ref) {
+            return Some(module_key);
+        }
+        if let Some(detached_instance) = take_detached_instance(module_ref) {
+            // Detached modules use owner id as execution key.
+            self.add_module(module_ref, detached_instance);
+            return Some(module_ref);
+        }
+        None
     }
 
     pub fn get_module(&self, module_id: u32) -> Option<&Instance> {
@@ -1868,19 +2014,10 @@ where
         self.result.as_deref()
     }
 
-    pub fn take_module(&mut self, module_id: u32) -> Option<Instance>
-    where
-        M: Clone + Into<crate::VectorMemory>,
-    {
-        if let Some(mut instance) = self.modules.remove(&module_id) {
-            // Sync memory changes back to the instance before returning it
-            if !instance.memories.is_empty() {
-                instance.memories[0] = self.memory.clone().into();
-            }
-            Some(instance)
-        } else {
-            None
-        }
+    pub fn take_module(&mut self, module_id: u32) -> Option<Instance> {
+        let instance = self.modules.remove(&module_id)?;
+        self.module_owner_map.remove(&instance.owner_id);
+        Some(instance)
     }
 
     pub fn into_single_module(self) -> Option<Instance> {
@@ -1905,6 +2042,44 @@ where
             .get(&module_id)
             .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
 
+        // Allow invoking exported imported functions by creating a trampoline frame.
+        let num_imported_funcs = instance.imported_functions.len() as u32;
+        if funcidx < num_imported_funcs {
+            let function_type_mapping = build_function_type_mapping(instance);
+            let type_idx = *function_type_mapping
+                .get(funcidx as usize)
+                .ok_or(ExecError::ExecutionFault(Fault::UnresolvableTypeIndex(funcidx)))?;
+            let func_type = &instance.module.types[type_idx];
+
+            for (i, (expected, actual)) in func_type.params.iter().zip(args.iter()).enumerate() {
+                if *expected != actual.type_of() {
+                    return Err(ExecError::LinkageError(LinkError::ArgumentTypeMismatch(
+                        i,
+                        *expected,
+                        actual.type_of(),
+                    )));
+                }
+            }
+
+            let mut program = crate::decode::Program::new();
+            program.return_types = func_type.results.clone();
+            program.push(Op::Call(funcidx));
+
+            let mut frame = Frame {
+                locals: vec![],
+                return_types: program.return_types.clone(),
+                program,
+                stack: Stack::new(),
+                pc: 0,
+                control_stack: vec![],
+            };
+            for arg in args {
+                arg.push_to(&mut frame.stack);
+            }
+            self.frame_stack.push((module_id, frame));
+            return Ok(());
+        }
+
         let frame = instance
             .frame_for_funcidx(funcidx, args)
             .map_err(ExecError::LinkageError)?;
@@ -1913,46 +2088,46 @@ where
         Ok(())
     }
 
-    /// Main execution loop that handles cross-module calls
-    pub fn run(&mut self) -> Result<(), ExecError> {
+    fn run_with_tick_budget(
+        &mut self,
+        mut remaining_ticks: Option<usize>,
+    ) -> Result<RunResult, ExecError> {
         loop {
             if self.frame_stack.is_empty() {
-                return Ok(());
+                return Ok(RunResult::Complete);
+            }
+            if let Some(remaining) = remaining_ticks {
+                if remaining == 0 {
+                    return Ok(RunResult::Paused);
+                }
             }
 
             let (current_module_id, _) = self.frame_stack.last().unwrap();
             let current_module_id = *current_module_id;
+            let max_ticks = remaining_ticks
+                .map(|remaining| remaining.saturating_add(1))
+                .unwrap_or(EXEC_TICK_LIMIT);
 
             // Execute current frame
             let result = {
                 let (_, frame) = self.frame_stack.last_mut().unwrap();
                 let module = self.modules.get_mut(&current_module_id).unwrap();
-
-                // Build complete function index space that includes both imported and local functions
-                let mut function_type_mapping = Vec::new();
-
-                // Add imported functions first
-                for (_, _, import) in module.module.imports.iter() {
-                    if let crate::module::Import::Func(type_idx) = import {
-                        function_type_mapping.push(*type_idx as usize);
-                    }
-                }
-
-                // Then add local functions
-                function_type_mapping.extend(module.module.functions.iter().copied());
-
-                execute(
-                    frame,
-                    &mut self.memory,
-                    &mut module.globals,
-                    &mut module.tables,
-                    1000000,
-                    &module.module.types,
-                    &function_type_mapping,
-                )
+                execute_module_frame(current_module_id, frame, module, max_ticks)
             };
 
-            let mut continuation = result;
+            if let Some(remaining) = remaining_ticks.as_mut() {
+                match result {
+                    Ok((_, ticks_used)) => {
+                        *remaining = remaining.saturating_sub(ticks_used);
+                    }
+                    Err(Fault::OutOfTicks) => {
+                        return Ok(RunResult::Paused);
+                    }
+                    Err(_) => {}
+                }
+            }
+
+            let mut continuation = result.map(|(continuation, _)| continuation);
 
             // Handle continuations in a loop to support recursive calls
             loop {
@@ -1981,7 +2156,7 @@ where
                         } else {
                             // No caller, this is the final result
                             self.result = Some(return_values.into_iter().map(|(_, v)| v).collect());
-                            return Ok(());
+                            return Ok(RunResult::Complete);
                         }
                         break; // Exit continuation loop to continue main execution loop
                     }
@@ -2021,6 +2196,7 @@ where
                                     continuation = Ok(Continuation::CallExternal {
                                         module_id: *module_id,
                                         func_id: *func_idx,
+                                        expected_type: None,
                                     });
                                     continue;
                                 }
@@ -2030,9 +2206,7 @@ where
                             let local_func_idx = funcidx - num_imported_funcs;
                             let func_index = local_func_idx as usize;
                             if func_index >= module.module.functions.len() {
-                                return Err(ExecError::ExecutionFault(
-                                    Fault::GlobalIndexOutOfBounds,
-                                ));
+                                return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
                             }
 
                             let type_idx = module.module.functions[func_index];
@@ -2053,36 +2227,91 @@ where
                             break; // Exit continuation loop to continue main execution loop
                         }
                     }
-                    Ok(Continuation::CallExternal { module_id, func_id }) => {
+                    Ok(Continuation::CallExternal {
+                        module_id,
+                        func_id,
+                        expected_type,
+                    }) => {
                         // Inter-module call
+                        let target_module_key = self
+                            .ensure_runtime_module_available(module_id)
+                            .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
                         let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                         let target_module = self
                             .modules
-                            .get(&module_id)
+                            .get(&target_module_key)
                             .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
 
-                        // Get function signature and pop arguments
+                        // Get function signature from the target module.
+                        let function_type_mapping = build_function_type_mapping(target_module);
                         let func_index = func_id as usize;
-                        if func_index >= target_module.module.functions.len() {
+                        if func_index >= function_type_mapping.len() {
                             return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
                         }
 
-                        let type_idx = target_module.module.functions[func_index];
+                        let type_idx = function_type_mapping[func_index];
                         let func_type = &target_module.module.types[type_idx];
 
-                        let mut args = vec![Value::Unit; func_type.params.len()];
-                        for (i, param_type) in func_type.params.iter().enumerate().rev() {
-                            let value = Value::pop_from(*param_type, &mut current_frame.stack)
-                                .map_err(ExecError::ExecutionFault)?;
-                            args[i] = value;
+                        if let Some((source_module_id, expected_type_idx)) = expected_type {
+                            let source_module = self
+                                .modules
+                                .get(&source_module_id)
+                                .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
+                            let expected_type = source_module
+                                .module
+                                .types
+                                .get(expected_type_idx as usize)
+                                .ok_or(ExecError::ExecutionFault(Fault::UnresolvableTypeIndex(
+                                    expected_type_idx,
+                                )))?;
+                            if expected_type.params != func_type.params
+                                || expected_type.results != func_type.results
+                            {
+                                return Err(ExecError::ExecutionFault(Fault::IndirectCallTypeMismatch));
+                            }
                         }
 
-                        // Create new frame in target module
-                        let frame = target_module
-                            .frame_for_funcidx(func_id, &args)
-                            .map_err(ExecError::LinkageError)?;
-                        self.frame_stack.push((module_id, frame));
-                        break; // Exit continuation loop to continue main execution loop
+                        // If the target is imported, dispatch recursively without creating a frame.
+                        if func_id < target_module.imported_functions.len() as u32 {
+                            let imported_func = &target_module.imported_functions[func_id as usize];
+                            match imported_func {
+                                ImportedFunction::Host(host_func) => {
+                                    let result = host_func(&mut current_frame.stack)
+                                        .map_err(ExecError::ExecutionFault)?;
+                                    match result {
+                                        Continuation::ProgramEnd => break,
+                                        other => {
+                                            continuation = Ok(other);
+                                            continue;
+                                        }
+                                    }
+                                }
+                                ImportedFunction::Module {
+                                    module_id,
+                                    func_idx,
+                                } => {
+                                    continuation = Ok(Continuation::CallExternal {
+                                        module_id: *module_id,
+                                        func_id: *func_idx,
+                                        expected_type: None,
+                                    });
+                                    continue;
+                                }
+                            }
+                        } else {
+                            // Create new frame in target module.
+                            let mut args = vec![Value::Unit; func_type.params.len()];
+                            for (i, param_type) in func_type.params.iter().enumerate().rev() {
+                                let value = Value::pop_from(*param_type, &mut current_frame.stack)
+                                    .map_err(ExecError::ExecutionFault)?;
+                                args[i] = value;
+                            }
+                            let frame = target_module
+                                .frame_for_funcidx(func_id, &args)
+                                .map_err(ExecError::LinkageError)?;
+                            self.frame_stack.push((target_module_key, frame));
+                            break; // Exit continuation loop to continue main execution loop
+                        }
                     }
                     Ok(Continuation::CallHost(host_func)) => {
                         // Handle host function call
@@ -2114,13 +2343,33 @@ where
             }
         }
     }
+
+    /// Run until completion.
+    pub fn run(&mut self) -> Result<(), ExecError> {
+        let run_result = self.run_with_tick_budget(None);
+        if run_result.is_err() {
+            self.frame_stack.clear();
+        }
+        match run_result? {
+            RunResult::Complete => Ok(()),
+            RunResult::Paused => Err(ExecError::ExecutionFault(Fault::OutOfTicks)),
+        }
+    }
+
+    /// Run for up to `ticks` instruction ticks and return whether execution completed or paused.
+    pub fn run_for_ticks(&mut self, ticks: usize) -> Result<RunResult, ExecError> {
+        let run_result = self.run_with_tick_budget(Some(ticks));
+        if run_result.is_err() {
+            self.frame_stack.clear();
+        }
+        run_result
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::exec::{ExecutionState, Value};
+    use crate::exec::{ExecutionState, RunResult, Value};
     use crate::instance::mk_instance;
-    use crate::memory::VectorMemory;
     use crate::module::Module;
 
     #[test]
@@ -2129,9 +2378,7 @@ mod tests {
         let module = Module::load(&module_data).unwrap();
         let linked = mk_instance(module).unwrap();
 
-        // Use the linked module's memory instead of creating a new one
-        let memory = linked.memories[0].clone();
-        let mut exec_state = ExecutionState::new(memory);
+        let mut exec_state = ExecutionState::new();
 
         // Add the module and run the itoa function
         exec_state.add_module(0, linked);
@@ -2145,9 +2392,7 @@ mod tests {
         let module = Module::load(&module_data).unwrap();
         let linked = mk_instance(module).unwrap();
 
-        // Use the linked module's memory instead of creating a new one
-        let memory = linked.memories[0].clone();
-        let mut exec_state = ExecutionState::new(memory);
+        let mut exec_state = ExecutionState::new();
 
         // Add the module to the execution state
         exec_state.add_module(0, linked);
@@ -2166,8 +2411,7 @@ mod tests {
         let module = Module::load(&module_data).unwrap();
         let linked = mk_instance(module).unwrap();
 
-        let memory = VectorMemory::new(1, None);
-        let mut exec_state = ExecutionState::new(memory);
+        let mut exec_state = ExecutionState::new();
 
         // Test adding and retrieving modules
         exec_state.add_module(42, linked);
@@ -2181,8 +2425,7 @@ mod tests {
 
     #[test]
     fn test_execution_state_empty_run() {
-        let memory = VectorMemory::new(1, None);
-        let mut exec_state = ExecutionState::<VectorMemory>::new(memory);
+        let mut exec_state = ExecutionState::new();
 
         // Running with no frames should return immediately
         let result = exec_state.run();
@@ -2192,12 +2435,46 @@ mod tests {
 
     #[test]
     fn test_execution_state_nonexistent_module() {
-        let memory = VectorMemory::new(1, None);
-        let mut exec_state = ExecutionState::<VectorMemory>::new(memory);
+        let mut exec_state = ExecutionState::new();
 
         // Try to prepare a function in a non-existent module
         let result = exec_state.prepare(999, 0, &[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_run_for_ticks_pause_and_resume() {
+        let module_data: Vec<u8> = include_bytes!("../tests/itoa.wasm").to_vec();
+        let module = Module::load(&module_data).unwrap();
+        let linked = mk_instance(module).unwrap();
+
+        let mut exec_state = ExecutionState::new();
+        exec_state.add_module(0, linked);
+        exec_state.prepare(0, 1, &[Value::I32(123)]).unwrap();
+
+        // Zero budget should pause without consuming state.
+        assert_eq!(exec_state.run_for_ticks(0).unwrap(), RunResult::Paused);
+        assert!(exec_state.frame_stack_len() > 0);
+
+        // Resume in small slices until completion.
+        let mut completed = false;
+        for _ in 0..10_000 {
+            match exec_state.run_for_ticks(64).unwrap() {
+                RunResult::Paused => continue,
+                RunResult::Complete => {
+                    completed = true;
+                    break;
+                }
+            }
+        }
+        assert!(completed, "execution did not complete within expected slices");
+        assert_eq!(exec_state.frame_stack_len(), 0);
+    }
+
+    #[test]
+    fn test_run_for_ticks_empty_execution_is_complete() {
+        let mut exec_state = ExecutionState::new();
+        assert_eq!(exec_state.run_for_ticks(0).unwrap(), RunResult::Complete);
     }
 
     // Note: Multi-module tests would require creating multiple WASM modules

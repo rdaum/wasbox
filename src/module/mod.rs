@@ -160,7 +160,7 @@ pub enum Data {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Code {
     pub locals: Vec<ValueType>,
     pub code: Region,
@@ -191,20 +191,20 @@ pub struct Global {
     pub expr: Region,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ElementMode {
     Passive,
     Active { table_index: u32, expr: Region },
     Declarative,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Elements {
     Function(Vec<u32>),
     Expression(Vec<Region>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ElementSegment {
     pub reftype: ReferenceType,
     pub elements: Elements,
@@ -226,6 +226,7 @@ impl ImportExportKind {
 /// Represents a WASM binary, loaded.
 /// Holds not just the program, but parsed data about the program such as its block structure,
 /// number of locals, etc.
+#[derive(Clone)]
 pub struct Module {
     // The original unmolested binary format.
     pub module_data: Vec<u8>,

@@ -147,21 +147,21 @@ impl Stack {
             .map(f64::from_bits)
     }
 
-    pub fn push_ref(&mut self, value: Option<u32>) {
-        // Use u32::MAX to represent None, otherwise store the value
+    pub fn push_ref(&mut self, value: Option<u64>) {
+        // Use u64::MAX to represent None, otherwise store the raw reference payload.
         let encoded = match value {
-            Some(v) => v as u64,
-            None => u32::MAX as u64,
+            Some(v) => v,
+            None => u64::MAX,
         };
         self.data.push(encoded);
     }
 
-    pub fn pop_ref(&mut self) -> Result<Option<u32>, Fault> {
+    pub fn pop_ref(&mut self) -> Result<Option<u64>, Fault> {
         let raw = self.data.pop().ok_or(Fault::StackUnderflow)?;
-        if raw == u32::MAX as u64 {
+        if raw == u64::MAX {
             Ok(None)
         } else {
-            Ok(Some(raw as u32))
+            Ok(Some(raw))
         }
     }
 

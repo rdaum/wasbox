@@ -202,15 +202,15 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_clone_independence() {
+    fn test_memory_clone_shares_backing_storage() {
         let mut original = VectorMemory::new(1024, None);
         original.set_i32(0, 100).unwrap();
 
         let mut cloned = original.clone();
         cloned.set_i32(0, 200).unwrap();
 
-        // Changes to clone should not affect original
-        assert_eq!(original.get_i32(0).unwrap(), 100);
+        // Changes to clone should be visible in original for imported/shared memories.
+        assert_eq!(original.get_i32(0).unwrap(), 200);
         assert_eq!(cloned.get_i32(0).unwrap(), 200);
     }
 
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_corruption_detection() {
+    fn test_memory_shared_clone_consistency() {
         let mut memory = VectorMemory::new(1024, None);
 
         // Fill memory with pattern
@@ -336,10 +336,10 @@ mod tests {
             assert_eq!(cloned.get_i32(i * 4).unwrap(), i as i32);
         }
 
-        // Modify original and verify clone is unchanged
+        // Modify original and verify clone observes the same shared backing.
         memory.set_i32(0, 999).unwrap();
         assert_eq!(memory.get_i32(0).unwrap(), 999);
-        assert_eq!(cloned.get_i32(0).unwrap(), 0); // Should still be original value
+        assert_eq!(cloned.get_i32(0).unwrap(), 999);
     }
 
     /// Test that simulates the specific block_test scenario

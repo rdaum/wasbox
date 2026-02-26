@@ -37,6 +37,12 @@ pub const SECTION_ID_DATA_COUNT: u8 = 12;
 fn read_limits(reader: &mut LEB128Reader) -> Result<(u32, Option<u32>), DecodeError> {
     // "Limits are encoded with a preceding flag indicating whether a maximum is present."
     let has_maximum = reader.load_imm_u8()?;
+    if (has_maximum & 0x80) != 0 {
+        return Err(MalformedMemory("integer representation too long".to_string()));
+    }
+    if has_maximum > 1 {
+        return Err(MalformedMemory("integer too large".to_string()));
+    }
     let initial = reader.load_imm_varuint32()?;
     let maximum = if has_maximum == 1 {
         Some(reader.load_imm_varuint32()?)
@@ -73,6 +79,24 @@ fn read_table(reader: &mut LEB128Reader) -> Result<Table, LoaderError> {
 
 const MAX_MEMORY_SIZE_PAGES: u32 = 0x10000;
 
+fn section_order(section_type: SectionType) -> u8 {
+    match section_type {
+        SectionType::Type => 1,
+        SectionType::Import => 2,
+        SectionType::Function => 3,
+        SectionType::Table => 4,
+        SectionType::Memory => 5,
+        SectionType::Global => 6,
+        SectionType::Export => 7,
+        SectionType::Start => 8,
+        SectionType::Element => 9,
+        SectionType::DataCount => 10,
+        SectionType::Code => 11,
+        SectionType::Data => 12,
+        SectionType::Custom => 0,
+    }
+}
+
 impl Module {
     pub fn load(module_data: &[u8]) -> Result<Self, LoaderError> {
         // Check for the WASM magic number
@@ -108,6 +132,8 @@ impl Module {
         let mut element_segments = vec![];
         let mut start_function = None;
         let mut data_count = None;
+        let mut seen_sections = [false; 13];
+        let mut last_section_order = 0u8;
         while reader.remaining() > 0 {
             // Read the section ID
             let section_type = reader.load_imm_u8().map_err(DecoderError)?;
@@ -115,8 +141,23 @@ impl Module {
             // Read the section length
             let section_length = reader.load_imm_varuint32().map_err(DecoderError)?;
             let offset = reader.position();
+            if section_length as isize > reader.remaining() {
+                return Err(DecoderError(FailedToDecode(
+                    "Section length out of bounds".to_string(),
+                )));
+            }
 
             let section_type = SectionType::from_u8(section_type)?;
+            if !matches!(section_type, SectionType::Custom) {
+                let order = section_order(section_type);
+                if order < last_section_order || seen_sections[order as usize] {
+                    return Err(DecoderError(FailedToDecode(
+                        "unexpected content after last section".to_string(),
+                    )));
+                }
+                seen_sections[order as usize] = true;
+                last_section_order = order;
+            }
 
             match section_type {
                 SectionType::Type => {
@@ -501,7 +542,11 @@ impl Module {
                     let _name = reader.load_string().map_err(DecoderError)?;
 
                     // Skip the rest of the custom section content
-                    let remaining = section_end - reader.position();
+                    let remaining = section_end.checked_sub(reader.position()).ok_or(
+                        DecoderError(FailedToDecode(
+                            "Custom section length underflow".to_string(),
+                        )),
+                    )?;
                     reader.advance(remaining);
                 }
                 SectionType::DataCount => {

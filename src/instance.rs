@@ -12,21 +12,50 @@
 //
 
 use crate::decode::{decode, Program, ScopeType};
-use crate::exec::{eval_init_expr, Fault, GlobalVar, Value};
+use crate::exec::{eval_init_expr, register_detached_instance, Fault, FuncRef, GlobalVar, Value};
 use crate::frame::Frame;
 use crate::import::{ImportResolver, ImportedFunction};
+use crate::memory::Memory;
 use crate::module::{Data, ReferenceType};
 use crate::stack::Stack;
 use crate::{DecodeError, Module, Type, ValueType, VectorMemory};
+use std::cell::RefCell;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const WASM_PAGE_SIZE: usize = 1 << 16;
+const FIRST_INSTANCE_OWNER_ID: u32 = 0x8000_0000;
+static NEXT_INSTANCE_OWNER_ID: AtomicU32 = AtomicU32::new(FIRST_INSTANCE_OWNER_ID);
+
+fn alloc_instance_owner_id() -> u32 {
+    NEXT_INSTANCE_OWNER_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn register_detached_snapshot(
+    owner_id: u32,
+    module: &Module,
+    memories: &[VectorMemory],
+    globals: &[GlobalVar],
+    programs: &[Program],
+    tables: &[TableInstance],
+) {
+    register_detached_instance(Instance {
+        owner_id,
+        module: module.clone(),
+        memories: memories.to_vec(),
+        globals: globals.to_vec(),
+        programs: programs.to_vec(),
+        tables: tables.to_vec(),
+        imported_functions: vec![],
+    });
+}
 
 /// Runtime representation of a table
 #[derive(Debug, Clone)]
 pub struct TableInstance {
-    pub elements: Vec<Option<Value>>,
+    pub elements: Rc<RefCell<Vec<Option<Value>>>>,
     pub ref_type: ReferenceType,
     pub limits: (u32, Option<u32>),
 }
@@ -60,6 +89,7 @@ impl Display for LinkError {
 impl Error for LinkError {}
 
 pub struct Instance {
+    pub owner_id: u32,
     pub module: Module,
     pub memories: Vec<VectorMemory>,
     pub globals: Vec<GlobalVar>,
@@ -143,6 +173,8 @@ fn mk_instance_internal(
     imported_tables: Vec<TableInstance>,
     imported_memories: Vec<VectorMemory>,
 ) -> Result<Instance, LinkError> {
+    let owner_id = alloc_instance_owner_id();
+
     // Check if this module has any imports
     let has_imports = !imported_functions.is_empty()
         || !imported_globals.is_empty()
@@ -166,6 +198,11 @@ fn mk_instance_internal(
 
     for (i, code) in module.code.iter().enumerate() {
         let program_memory = module.code(i);
+        if program_memory.last().copied() != Some(0x0b) {
+            return Err(LinkError::DecodeError(DecodeError::FailedToDecode(
+                "END opcode expected".to_string(),
+            )));
+        }
         let mut program = decode(program_memory).map_err(LinkError::DecodeError)?;
 
         // Make local types from function signatures + code local signatures
@@ -202,7 +239,7 @@ fn mk_instance_internal(
         let min_size = t_decl.limits.0;
         let max_size = t_decl.limits.1;
         TableInstance {
-            elements: vec![None; min_size as usize],
+            elements: Rc::new(RefCell::new(vec![None; min_size as usize])),
             ref_type: t_decl.ty,
             limits: (min_size, max_size),
         }
@@ -213,43 +250,126 @@ fn mk_instance_internal(
         if let crate::module::ElementMode::Active { table_index, expr } = &element_segment.mode {
             let table_idx = *table_index as usize;
             if table_idx < tables.len() {
-                if let crate::module::Elements::Function(func_indices) = &element_segment.elements {
-                    // Evaluate the init expression to get the offset
-                    let offset_value = if has_imports {
-                        // Build complete function index space: [imported_functions] + [local_functions]
-                        let mut function_types = Vec::new();
-                        for (_, _, import) in &module.imports {
-                            if let crate::module::Import::Func(type_idx) = import {
-                                function_types.push(*type_idx as usize);
-                            }
+                // Evaluate the init expression to get the table write offset.
+                let offset_value = if has_imports {
+                    let mut function_types = Vec::new();
+                    for (_, _, import) in &module.imports {
+                        if let crate::module::Import::Func(type_idx) = import {
+                            function_types.push(*type_idx as usize);
                         }
-                        function_types.extend_from_slice(&module.functions);
-                        eval_init_expr(
-                            module.get_expr(expr),
-                            ValueType::I32,
-                            &imported_global_vars,
-                            &module.types,
-                            &function_types,
-                        )
-                    } else {
-                        // Even without imports, we need to pass function information for ref.func to work
-                        eval_init_expr(
-                            module.get_expr(expr),
-                            ValueType::I32,
-                            &[],
-                            &module.types,
-                            &module.functions,
-                        )
                     }
-                    .map_err(LinkError::ActiveExpressionError)?;
-                    let Value::I32(offset) = offset_value else {
-                        panic!("Element segment offset must be i32");
-                    };
-                    let offset = offset as usize;
-                    for (i, &func_idx) in func_indices.iter().enumerate() {
-                        if offset + i < tables[table_idx].elements.len() {
-                            tables[table_idx].elements[offset + i] =
-                                Some(Value::FuncRef(Some(func_idx)));
+                    function_types.extend_from_slice(&module.functions);
+                    eval_init_expr(
+                        module.get_expr(expr),
+                        ValueType::I32,
+                        &imported_global_vars,
+                        &module.types,
+                        &function_types,
+                        owner_id,
+                    )
+                } else {
+                    eval_init_expr(
+                        module.get_expr(expr),
+                        ValueType::I32,
+                        &[],
+                        &module.types,
+                        &module.functions,
+                        owner_id,
+                    )
+                }
+                .map_err(LinkError::ActiveExpressionError)?;
+                let Value::I32(offset) = offset_value else {
+                    panic!("Element segment offset must be i32");
+                };
+                if offset < 0 {
+                    register_detached_snapshot(
+                        owner_id,
+                        &module,
+                        &memories,
+                        &imported_global_vars,
+                        &programs,
+                        &tables,
+                    );
+                    return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
+                }
+                let offset = offset as usize;
+
+                match &element_segment.elements {
+                    crate::module::Elements::Function(func_indices) => {
+                        let mut table_elements = tables[table_idx].elements.borrow_mut();
+                        let write_end = offset.checked_add(func_indices.len()).ok_or(
+                            LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds),
+                        )?;
+                        if write_end > table_elements.len() {
+                            drop(table_elements);
+                            register_detached_snapshot(
+                                owner_id,
+                                &module,
+                                &memories,
+                                &imported_global_vars,
+                                &programs,
+                                &tables,
+                            );
+                            return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
+                        }
+                        for (i, &func_idx) in func_indices.iter().enumerate() {
+                            table_elements[offset + i] = Some(Value::FuncRef(Some(FuncRef {
+                                module_id: owner_id,
+                                func_idx,
+                            })));
+                        }
+                    }
+                    crate::module::Elements::Expression(exprs) => {
+                        let mut table_elements = tables[table_idx].elements.borrow_mut();
+                        let write_end = offset
+                            .checked_add(exprs.len())
+                            .ok_or(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds))?;
+                        if write_end > table_elements.len() {
+                            drop(table_elements);
+                            register_detached_snapshot(
+                                owner_id,
+                                &module,
+                                &memories,
+                                &imported_global_vars,
+                                &programs,
+                                &tables,
+                            );
+                            return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
+                        }
+
+                        for (i, expr) in exprs.iter().enumerate() {
+                            let expected_type = match element_segment.reftype {
+                                ReferenceType::FuncRef => ValueType::FuncRef,
+                                ReferenceType::ExternRef => ValueType::ExternRef,
+                            };
+                            let value = if has_imports {
+                                let mut function_types = Vec::new();
+                                for (_, _, import) in &module.imports {
+                                    if let crate::module::Import::Func(type_idx) = import {
+                                        function_types.push(*type_idx as usize);
+                                    }
+                                }
+                                function_types.extend_from_slice(&module.functions);
+                                eval_init_expr(
+                                    module.get_expr(expr),
+                                    expected_type,
+                                    &imported_global_vars,
+                                    &module.types,
+                                    &function_types,
+                                    owner_id,
+                                )
+                            } else {
+                                eval_init_expr(
+                                    module.get_expr(expr),
+                                    expected_type,
+                                    &[],
+                                    &module.types,
+                                    &module.functions,
+                                    owner_id,
+                                )
+                            }
+                            .map_err(LinkError::ActiveExpressionError)?;
+                            table_elements[offset + i] = Some(value);
                         }
                     }
                 }
@@ -264,7 +384,15 @@ fn mk_instance_internal(
         ));
     }
 
-    // Populate memory from global data (only if memory exists).
+    // Populate memory from global data.
+    for data_segment in &module.data {
+        match data_segment {
+            Data::Active { .. } | Data::ActiveMemIdx { .. } if memories.is_empty() => {
+                return Err(LinkError::MissingMemory);
+            }
+            _ => {}
+        }
+    }
     if !memories.is_empty() {
         for data_segment in &module.data {
             match data_segment {
@@ -286,6 +414,7 @@ fn mk_instance_internal(
                             &imported_global_vars,
                             &module.types,
                             &function_types,
+                            owner_id,
                         )
                     } else {
                         // Even without imports, we need to pass function information for ref.func to work
@@ -295,6 +424,7 @@ fn mk_instance_internal(
                             &[],
                             &module.types,
                             &module.functions,
+                            owner_id,
                         )
                     }
                     .map_err(LinkError::ActiveExpressionError)?;
@@ -304,7 +434,29 @@ fn mk_instance_internal(
                     let data_offset = data_offset as usize;
                     // Read from program memory @ data offset into memory_vec
                     let data_len = data.1 - data.0;
-                    memories[0].data_mut()[data_offset..data_offset + data_len]
+                    let Some(data_end) = data_offset.checked_add(data_len) else {
+                        register_detached_snapshot(
+                            owner_id,
+                            &module,
+                            &memories,
+                            &imported_global_vars,
+                            &programs,
+                            &tables,
+                        );
+                        return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
+                    };
+                    if data_end > memories[0].size() {
+                        register_detached_snapshot(
+                            owner_id,
+                            &module,
+                            &memories,
+                            &imported_global_vars,
+                            &programs,
+                            &tables,
+                        );
+                        return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
+                    }
+                    memories[0].data_mut()[data_offset..data_end]
                         .copy_from_slice(&module.module_data[data.0..data.1]);
                 }
                 Data::ActiveMemIdx { memidx, expr, data } => {
@@ -325,6 +477,7 @@ fn mk_instance_internal(
                             &imported_global_vars,
                             &module.types,
                             &function_types,
+                            owner_id,
                         )
                     } else {
                         // Even without imports, we need to pass function information for ref.func to work
@@ -334,6 +487,7 @@ fn mk_instance_internal(
                             &[],
                             &module.types,
                             &module.functions,
+                            owner_id,
                         )
                     }
                     .map_err(LinkError::ActiveExpressionError)?;
@@ -341,13 +495,58 @@ fn mk_instance_internal(
                         panic!("Data segment offset must be i32");
                     };
                     let data_offset = data_offset as usize;
-                    memories[*memidx as usize].data_mut()
-                        [data_offset..data_offset + data.1 - data.0]
+                    let data_len = data.1 - data.0;
+                    let memory_idx = *memidx as usize;
+                    if memory_idx >= memories.len() {
+                        register_detached_snapshot(
+                            owner_id,
+                            &module,
+                            &memories,
+                            &imported_global_vars,
+                            &programs,
+                            &tables,
+                        );
+                        return Err(LinkError::MissingMemory);
+                    }
+                    let Some(data_end) = data_offset.checked_add(data_len) else {
+                        register_detached_snapshot(
+                            owner_id,
+                            &module,
+                            &memories,
+                            &imported_global_vars,
+                            &programs,
+                            &tables,
+                        );
+                        return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
+                    };
+                    if data_end > memories[memory_idx].size() {
+                        register_detached_snapshot(
+                            owner_id,
+                            &module,
+                            &memories,
+                            &imported_global_vars,
+                            &programs,
+                            &tables,
+                        );
+                        return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
+                    }
+                    memories[memory_idx].data_mut()[data_offset..data_end]
                         .copy_from_slice(&module.module_data[data.0..data.1]);
                 }
                 Data::Passive { data } => {
                     let offset = data.0;
                     let end = data.1;
+                    if end > memories[0].size() {
+                        register_detached_snapshot(
+                            owner_id,
+                            &module,
+                            &memories,
+                            &imported_global_vars,
+                            &programs,
+                            &tables,
+                        );
+                        return Err(LinkError::ActiveExpressionError(Fault::MemoryOutOfBounds));
+                    }
                     memories[0].data_mut()[offset..end]
                         .copy_from_slice(&module.module_data[offset..end]);
                 }
@@ -380,6 +579,7 @@ fn mk_instance_internal(
                 &imported_global_vars,
                 &module.types,
                 &function_types,
+                owner_id,
             )
         } else {
             // Even without imports, we need to pass function information for ref.func to work
@@ -389,6 +589,7 @@ fn mk_instance_internal(
                 &[],
                 &module.types,
                 &module.functions,
+                owner_id,
             )
         }
         .map_err(LinkError::ActiveExpressionError)?;
@@ -399,6 +600,7 @@ fn mk_instance_internal(
     }
 
     let instance = Instance {
+        owner_id,
         module,
         memories,
         globals,
@@ -410,15 +612,9 @@ fn mk_instance_internal(
     // Execute start function if present
     if let Some(start_func_idx) = instance.module.start_function {
         // Create execution context and run the start function
-        use crate::{ExecutionState, VectorMemory};
+        use crate::ExecutionState;
 
-        let memory = if !instance.memories.is_empty() {
-            instance.memories[0].clone()
-        } else {
-            VectorMemory::new(0, None)
-        };
-
-        let mut execution = ExecutionState::new(memory);
+        let mut execution = ExecutionState::new();
         execution.add_module(0, instance);
         execution
             .prepare(0, start_func_idx as u32, &[])
@@ -426,32 +622,89 @@ fn mk_instance_internal(
                 crate::exec::ExecError::ExecutionFault(f) => LinkError::ActiveExpressionError(f),
                 crate::exec::ExecError::LinkageError(l) => l,
             })?;
-        execution.run().map_err(|e| match e {
-            crate::exec::ExecError::ExecutionFault(f) => LinkError::ActiveExpressionError(f),
-            crate::exec::ExecError::LinkageError(l) => l,
-        })?;
-
-        // Extract the instance back from execution (automatically syncs memory)
-        let updated_instance = execution.take_module(0).unwrap();
-        Ok(updated_instance)
+        match execution.run() {
+            Ok(()) => {
+                // Extract the instance back from execution (automatically syncs memory)
+                let updated_instance = execution.take_module(0).unwrap();
+                Ok(updated_instance)
+            }
+            Err(e) => {
+                // Preserve detached function bodies so imported tables can keep refs written
+                // before the start trap.
+                if let Some(detached_instance) = execution.take_module(0) {
+                    register_detached_instance(detached_instance);
+                }
+                Err(match e {
+                    crate::exec::ExecError::ExecutionFault(f) => LinkError::ActiveExpressionError(f),
+                    crate::exec::ExecError::LinkageError(l) => l,
+                })
+            }
+        }
     } else {
         Ok(instance)
     }
 }
 
 impl Instance {
-    pub fn find_funcidx(&self, name: &str) -> Option<u32> {
+    fn find_exportidx(&self, name: &str, kind: crate::module::ImportExportKind) -> Option<u32> {
         for export in &self.module.exports {
-            if export.name == name {
-                match export.kind {
-                    crate::module::ImportExportKind::Function => {
-                        return Some(export.index);
-                    }
-                    _ => continue,
-                }
+            if export.name == name && export.kind == kind {
+                return Some(export.index);
             }
         }
         None
+    }
+
+    pub fn find_funcidx(&self, name: &str) -> Option<u32> {
+        self.find_exportidx(name, crate::module::ImportExportKind::Function)
+    }
+
+    pub fn find_globalidx(&self, name: &str) -> Option<u32> {
+        self.find_exportidx(name, crate::module::ImportExportKind::Global)
+    }
+
+    pub fn find_tableidx(&self, name: &str) -> Option<u32> {
+        self.find_exportidx(name, crate::module::ImportExportKind::Table)
+    }
+
+    pub fn find_memoryidx(&self, name: &str) -> Option<u32> {
+        self.find_exportidx(name, crate::module::ImportExportKind::Memory)
+    }
+
+    pub fn exported_functions(&self) -> Vec<(String, u32)> {
+        self.module
+            .exports
+            .iter()
+            .filter(|e| e.kind == crate::module::ImportExportKind::Function)
+            .map(|e| (e.name.clone(), e.index))
+            .collect()
+    }
+
+    pub fn exported_globals(&self) -> Vec<(String, u32)> {
+        self.module
+            .exports
+            .iter()
+            .filter(|e| e.kind == crate::module::ImportExportKind::Global)
+            .map(|e| (e.name.clone(), e.index))
+            .collect()
+    }
+
+    pub fn exported_tables(&self) -> Vec<(String, u32)> {
+        self.module
+            .exports
+            .iter()
+            .filter(|e| e.kind == crate::module::ImportExportKind::Table)
+            .map(|e| (e.name.clone(), e.index))
+            .collect()
+    }
+
+    pub fn exported_memories(&self) -> Vec<(String, u32)> {
+        self.module
+            .exports
+            .iter()
+            .filter(|e| e.kind == crate::module::ImportExportKind::Memory)
+            .map(|e| (e.name.clone(), e.index))
+            .collect()
     }
 
     pub fn frame_for_funcidx(&self, index: u32, args: &[Value]) -> Result<Frame, LinkError> {
@@ -534,8 +787,10 @@ impl Instance {
         } else if frame.return_types.len() == 1 {
             Type::ValueType(frame.return_types[0])
         } else {
-            // For multiple return values, we'd need a function type, but for now assume single return
-            Type::ValueType(frame.return_types[0])
+            Type::FunctionType(crate::FuncType {
+                params: vec![],
+                results: frame.return_types.clone(),
+            })
         };
 
         // Add function scope for proper control flow management
