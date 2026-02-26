@@ -11,7 +11,7 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-use crate::decode::{decode, ScopeType};
+use crate::decode::{decode, Program, ScopeType};
 use crate::frame::Frame;
 use crate::import::{HostFunction, ImportResolver, ImportedFunction};
 use crate::instance::{LinkError, TableInstance, WASM_PAGE_SIZE};
@@ -21,7 +21,7 @@ use crate::module::Module;
 use crate::module::{Global, ReferenceType};
 use crate::op::{MemArg, Op};
 use crate::stack::Stack;
-use crate::{FuncType, Instance, Type, TypeSignature, ValueType};
+use crate::{FuncType, Instance, TypeSignature, ValueType};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
@@ -283,21 +283,8 @@ fn trunc_f64_to_u64(value: f64) -> Result<u64, Fault> {
     Ok(value.trunc() as u64)
 }
 
-fn resolve_type(types: &[FuncType], ts: TypeSignature) -> Result<Type, Fault> {
-    match ts {
-        TypeSignature::ValueType(v) => Ok(Type::ValueType(v)),
-        TypeSignature::Index(idx) => {
-            let ft = types
-                .get(idx as usize)
-                .ok_or(Fault::UnresolvableTypeIndex(idx))
-                .cloned();
-            Ok(Type::FunctionType(ft?))
-        }
-    }
-}
-
 /// Unified branch execution using structured control flow
-fn execute_branch(frame: &mut Frame, depth: usize) -> Result<(), Fault> {
+fn execute_branch(frame: &mut Frame, types: &[FuncType], depth: usize) -> Result<(), Fault> {
     if depth >= frame.control_stack.len() {
         return Err(Fault::ControlStackUnderflow);
     }
@@ -324,23 +311,27 @@ fn execute_branch(frame: &mut Frame, depth: usize) -> Result<(), Fault> {
     // branch arity is the block result arity.
     frame.scratch_values.clear();
     match (&frame.control_stack[target_idx].signature, target_scope_type) {
-        (Type::ValueType(_), ScopeType::Loop) => {
+        (TypeSignature::ValueType(_), ScopeType::Loop) => {
             // Value-typed loop blocks have no explicit params in MVP encoding.
         }
-        (Type::FunctionType(ft), ScopeType::Loop) => {
+        (TypeSignature::Index(idx), ScopeType::Loop) => {
+            debug_assert!((*idx as usize) < types.len());
+            let ft = unsafe { types.get_unchecked(*idx as usize) };
             frame.scratch_values.resize(ft.params.len(), Value::Unit);
             for (i, vt) in ft.params.iter().enumerate().rev() {
                 frame.scratch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
             }
         }
-        (Type::ValueType(vt), _) => {
+        (TypeSignature::ValueType(vt), _) => {
             if *vt != ValueType::Unit && frame.stack.width() > 0 {
                 frame
                     .scratch_values
                     .push(Value::pop_from(*vt, &mut frame.stack)?);
             }
         }
-        (Type::FunctionType(ft), _) => {
+        (TypeSignature::Index(idx), _) => {
+            debug_assert!((*idx as usize) < types.len());
+            let ft = unsafe { types.get_unchecked(*idx as usize) };
             frame.scratch_values.resize(ft.results.len(), Value::Unit);
             for (i, vt) in ft.results.iter().enumerate().rev() {
                 frame.scratch_values[i] = Value::pop_from(*vt, &mut frame.stack)?;
@@ -449,12 +440,16 @@ fn execute<const TRACK_TICKS: bool>(
             Op::Nop => continue,
             Op::Unreachable => return Err(Fault::Unreachable),
             Op::StartScope(sig, scope_type) => {
-                let resolved_type = resolve_type(types, *sig)?;
+                if let TypeSignature::Index(idx) = *sig {
+                    if idx as usize >= types.len() {
+                        return Err(Fault::UnresolvableTypeIndex(idx));
+                    }
+                }
                 let end_pc = frame.program.scope_end_jumps[pc];
                 if end_pc == usize::MAX {
                     return Err(Fault::Unreachable);
                 }
-                frame.push_control(resolved_type, *scope_type, pc, end_pc);
+                frame.push_control(*sig, *scope_type, pc, end_pc);
                 continue;
             }
             Op::EndScope(c) => {
@@ -462,7 +457,7 @@ fn execute<const TRACK_TICKS: bool>(
                 if matches!(c, ScopeType::Program) {
                     return Ok((Continuation::DoneReturn, ticks_used));
                 }
-                let end_scope = frame.pop_control()?;
+                let end_scope = frame.pop_control(types)?;
 
                 // Shrink-stack to the width declared in the control scope.
                 frame.stack.shrink_to(end_scope.stack_width);
@@ -491,13 +486,13 @@ fn execute<const TRACK_TICKS: bool>(
                 continue;
             }
             Op::Br(depth) => {
-                execute_branch(frame, *depth as usize)?;
+                execute_branch(frame, types, *depth as usize)?;
                 continue;
             }
             Op::BrIf(depth) => {
                 let condition = frame.stack.pop_u32()?;
                 if condition != 0 {
-                    execute_branch(frame, *depth as usize)?;
+                    execute_branch(frame, types, *depth as usize)?;
                     continue;
                 }
                 continue;
@@ -510,7 +505,7 @@ fn execute<const TRACK_TICKS: bool>(
                     return Err(Fault::Unreachable);
                 };
                 if v == 0 {
-                    execute_branch(frame, *depth as usize)?;
+                    execute_branch(frame, types, *depth as usize)?;
                 }
                 continue;
             }
@@ -525,7 +520,7 @@ fn execute<const TRACK_TICKS: bool>(
                     return Err(Fault::Unreachable);
                 };
                 if (lhs as u32) >= (rhs as u32) {
-                    execute_branch(frame, *depth as usize)?;
+                    execute_branch(frame, types, *depth as usize)?;
                 }
                 continue;
             }
@@ -536,7 +531,7 @@ fn execute<const TRACK_TICKS: bool>(
                 } else {
                     *default
                 } as usize;
-                execute_branch(frame, depth)?;
+                execute_branch(frame, types, depth)?;
                 continue;
             }
             Op::Return => return Ok((Continuation::DoneReturn, ticks_used)),
@@ -2669,6 +2664,37 @@ impl ExecutionState {
         }
     }
 
+    fn pop_recycled_frame_for_program_ptr(
+        &mut self,
+        program_ptr: *const Program,
+    ) -> Option<Frame> {
+        let len = self.recycled_frames.len();
+        if len == 0 {
+            return None;
+        }
+
+        if Rc::as_ptr(&self.recycled_frames[len - 1].program) == program_ptr {
+            return self.recycled_frames.pop();
+        }
+
+        let idx = self.recycled_frames[..len - 1]
+            .iter()
+            .rposition(|f| Rc::as_ptr(&f.program) == program_ptr)?;
+        Some(self.recycled_frames.swap_remove(idx))
+    }
+
+    fn local_program_ptr(module: &Instance, funcidx: u32) -> Result<*const Program, Fault> {
+        if funcidx < module.num_imported_functions {
+            return Err(Fault::GlobalIndexOutOfBounds);
+        }
+        let local_idx = (funcidx - module.num_imported_functions) as usize;
+        let program = module
+            .programs
+            .get(local_idx)
+            .ok_or(Fault::GlobalIndexOutOfBounds)?;
+        Ok(Rc::as_ptr(program))
+    }
+
     fn clear_and_recycle_active_frames(&mut self) {
         while let Some((_, frame)) = self.frame_stack.pop() {
             self.recycle_frame(frame);
@@ -2808,7 +2834,14 @@ impl ExecutionState {
             }
         }
 
-        let recycled_frame = self.recycled_frames.pop();
+        let program_ptr = {
+            let instance = self
+                .modules
+                .get(&module_id)
+                .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
+            Self::local_program_ptr(instance, funcidx).map_err(ExecError::ExecutionFault)?
+        };
+        let recycled_frame = self.pop_recycled_frame_for_program_ptr(program_ptr);
         let instance = self
             .modules
             .get(&module_id)
@@ -2939,12 +2972,17 @@ impl ExecutionState {
                     }
                     Continuation::Call(funcidx) => {
                         // Function call - check if it's imported or local
-                        let recycled_frame = self.recycled_frames.pop();
-                        let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                         let module = self.modules.get(&current_module_id).unwrap();
 
                         if module.num_imported_functions == 0 {
                             // Common hot path: module has no imports, so all calls are local.
+                            let target_program_ptr =
+                                Self::local_program_ptr(module, funcidx)
+                                    .map_err(ExecError::ExecutionFault)?;
+                            let recycled_frame =
+                                self.pop_recycled_frame_for_program_ptr(target_program_ptr);
+                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                            let module = self.modules.get(&current_module_id).unwrap();
                             let frame = if let Some(mut frame) = recycled_frame {
                                 module
                                     .refill_frame_for_funcidx_from_stack(
@@ -2967,6 +3005,7 @@ impl ExecutionState {
                                 .imported_functions
                                 .get(funcidx as usize)
                                 .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
+                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                             match imported_func {
                                 ImportedFunction::Host(host_func) => {
                                     // Call host function directly
@@ -3000,6 +3039,13 @@ impl ExecutionState {
                             }
                         } else {
                             // Local function call
+                            let target_program_ptr =
+                                Self::local_program_ptr(module, funcidx)
+                                    .map_err(ExecError::ExecutionFault)?;
+                            let recycled_frame =
+                                self.pop_recycled_frame_for_program_ptr(target_program_ptr);
+                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                            let module = self.modules.get(&current_module_id).unwrap();
                             // Create new frame for the called function
                             let frame = if let Some(mut frame) = recycled_frame {
                                 module
@@ -3028,8 +3074,6 @@ impl ExecutionState {
                         let target_module_key = self
                             .ensure_runtime_module_available(module_id)
                             .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
-                        let recycled_frame = self.recycled_frames.pop();
-                        let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                         let target_module = self
                             .modules
                             .get(&target_module_key)
@@ -3071,6 +3115,7 @@ impl ExecutionState {
                                 target_module.imported_functions.get(func_id as usize).ok_or(
                                     ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds),
                                 )?;
+                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                             match imported_func {
                                 ImportedFunction::Host(host_func) => {
                                     let result = host_func(&mut current_frame.stack)
@@ -3097,6 +3142,17 @@ impl ExecutionState {
                             }
                         } else {
                             // Create new frame in target module.
+                            let target_program_ptr = Self::local_program_ptr(target_module, func_id)
+                                .map_err(ExecError::ExecutionFault)?;
+                            let recycled_frame =
+                                self.pop_recycled_frame_for_program_ptr(target_program_ptr);
+                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                            let target_module = self
+                                .modules
+                                .get(&target_module_key)
+                                .ok_or(ExecError::ExecutionFault(
+                                    Fault::GlobalIndexOutOfBounds,
+                                ))?;
                             let frame = if let Some(mut frame) = recycled_frame {
                                 target_module
                                     .refill_frame_for_funcidx_from_stack(

@@ -14,7 +14,7 @@
 use crate::decode::{Program, ScopeType};
 use crate::exec::{Fault, Value};
 use crate::stack::Stack;
-use crate::{Type, ValueType};
+use crate::{FuncType, TypeSignature, ValueType};
 use std::rc::Rc;
 
 pub struct Frame {
@@ -27,7 +27,7 @@ pub struct Frame {
 }
 
 pub struct Control {
-    pub signature: Type,
+    pub signature: TypeSignature,
     pub scope_type: ScopeType,
     pub stack_width: usize,
     pub start_pc: usize,
@@ -48,7 +48,7 @@ impl Frame {
 
     pub fn push_control(
         &mut self,
-        signature: Type,
+        signature: TypeSignature,
         scope_type: ScopeType,
         start_pc: usize,
         end_pc: usize,
@@ -62,7 +62,7 @@ impl Frame {
         });
     }
 
-    pub fn pop_control(&mut self) -> Result<Control, Fault> {
+    pub fn pop_control(&mut self, types: &[FuncType]) -> Result<Control, Fault> {
         let c = self
             .control_stack
             .pop()
@@ -71,13 +71,15 @@ impl Frame {
         // Pop the result values BEFORE shrinking the stack and stash in reusable scratch.
         self.scratch_values.clear();
         match &c.signature {
-            Type::ValueType(vt) => {
+            TypeSignature::ValueType(vt) => {
                 if *vt != ValueType::Unit {
                     self.scratch_values
                         .push(Value::pop_from(*vt, &mut self.stack)?);
                 }
             }
-            Type::FunctionType(ft) => {
+            TypeSignature::Index(idx) => {
+                debug_assert!((*idx as usize) < types.len());
+                let ft = unsafe { types.get_unchecked(*idx as usize) };
                 self.scratch_values.resize(ft.results.len(), Value::Unit);
                 for (i, vt) in ft.results.iter().enumerate().rev() {
                     self.scratch_values[i] = Value::pop_from(*vt, &mut self.stack)?;

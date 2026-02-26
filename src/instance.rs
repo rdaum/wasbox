@@ -18,7 +18,7 @@ use crate::import::{ImportResolver, ImportedFunction};
 use crate::memory::Memory;
 use crate::module::{Data, ReferenceType};
 use crate::stack::Stack;
-use crate::{DecodeError, Module, Type, ValueType, VectorMemory};
+use crate::{DecodeError, Module, TypeSignature, ValueType, VectorMemory};
 use std::cell::RefCell;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -45,7 +45,7 @@ fn register_detached_snapshot(
 ) {
     let program_local_defaults = build_program_local_defaults(module, programs);
     let function_param_types = build_function_param_types(module);
-    let function_scope_signatures = build_function_scope_signatures(programs);
+    let function_scope_signatures = build_function_scope_signatures(module);
     register_detached_instance(Instance {
         owner_id,
         module: module.clone(),
@@ -151,21 +151,11 @@ fn build_function_param_types(module: &Module) -> Vec<Vec<ValueType>> {
         .collect()
 }
 
-fn build_function_scope_signatures(programs: &[Rc<Program>]) -> Vec<Type> {
-    programs
+fn build_function_scope_signatures(module: &Module) -> Vec<TypeSignature> {
+    module
+        .functions
         .iter()
-        .map(|program| {
-            if program.return_types.is_empty() {
-                Type::ValueType(ValueType::Unit)
-            } else if program.return_types.len() == 1 {
-                Type::ValueType(program.return_types[0])
-            } else {
-                Type::FunctionType(crate::FuncType {
-                    params: vec![],
-                    results: program.return_types.clone(),
-                })
-            }
-        })
+        .map(|&type_idx| TypeSignature::Index(type_idx as u32))
         .collect()
 }
 
@@ -197,7 +187,7 @@ pub struct Instance {
     pub globals: Vec<GlobalVar>,
     pub programs: Vec<Rc<Program>>,
     pub function_param_types: Vec<Vec<ValueType>>,
-    pub function_scope_signatures: Vec<Type>,
+    pub function_scope_signatures: Vec<TypeSignature>,
     pub program_local_defaults: Vec<Vec<Value>>,
     pub num_imported_functions: u32,
     pub function_type_mapping: Vec<usize>,
@@ -754,7 +744,7 @@ fn mk_instance_internal(
     let function_type_mapping = build_function_type_mapping(&module);
     let program_local_defaults = build_program_local_defaults(&module, &programs);
     let function_param_types = build_function_param_types(&module);
-    let function_scope_signatures = build_function_scope_signatures(&programs);
+    let function_scope_signatures = build_function_scope_signatures(&module);
     let instance = Instance {
         owner_id,
         module,
@@ -927,7 +917,7 @@ impl Instance {
 
         // Add function scope for proper control flow management
         frame.push_control(
-            self.function_scope_signatures[index].clone(),
+            self.function_scope_signatures[index],
             ScopeType::Function,
             0,
             program.ops.len(),
@@ -985,7 +975,7 @@ impl Instance {
         };
 
         frame.push_control(
-            self.function_scope_signatures[index].clone(),
+            self.function_scope_signatures[index],
             ScopeType::Function,
             0,
             program.ops.len(),
@@ -1045,7 +1035,7 @@ impl Instance {
         frame.scratch_values.clear();
 
         frame.push_control(
-            self.function_scope_signatures[index].clone(),
+            self.function_scope_signatures[index],
             ScopeType::Function,
             0,
             program.ops.len(),
@@ -1121,7 +1111,7 @@ impl Instance {
         frame.scratch_values.clear();
 
         frame.push_control(
-            self.function_scope_signatures[local_idx].clone(),
+            self.function_scope_signatures[local_idx],
             ScopeType::Function,
             0,
             program.ops.len(),
