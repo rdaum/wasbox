@@ -13,7 +13,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::fmt::{Debug, Formatter};
@@ -113,6 +113,7 @@ mod tests {
                     elements: Rc::new(RefCell::new(vec![None; 10])), // Start with 10 elements
                     ref_type: ReferenceType::FuncRef,
                     limits: (10, Some(20)), // Min 10, max 20
+                    generation: Rc::new(Cell::new(0)),
                 }),
                 _ => None,
             }

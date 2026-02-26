@@ -320,14 +320,16 @@ fn execute_branch(frame: &mut Frame, types: &[FuncType], depth: usize) -> Result
             let ft = unsafe { types.get_unchecked(*idx as usize) };
             frame.scratch_values_raw.resize(ft.params.len(), 0);
             for (i, vt) in ft.params.iter().enumerate().rev() {
-                frame.scratch_values_raw[i] = Value::pop_raw_from(*vt, &mut frame.stack)?;
+                debug_assert_ne!(*vt, ValueType::V128);
+                frame.scratch_values_raw[i] = frame.stack.pop_u64()?;
             }
         }
         (TypeSignature::ValueType(vt), _) => {
             if *vt != ValueType::Unit && frame.stack.width() > 0 {
+                debug_assert_ne!(*vt, ValueType::V128);
                 frame
                     .scratch_values_raw
-                    .push(Value::pop_raw_from(*vt, &mut frame.stack)?);
+                    .push(frame.stack.pop_u64()?);
             }
         }
         (TypeSignature::Index(idx), _) => {
@@ -335,7 +337,8 @@ fn execute_branch(frame: &mut Frame, types: &[FuncType], depth: usize) -> Result
             let ft = unsafe { types.get_unchecked(*idx as usize) };
             frame.scratch_values_raw.resize(ft.results.len(), 0);
             for (i, vt) in ft.results.iter().enumerate().rev() {
-                frame.scratch_values_raw[i] = Value::pop_raw_from(*vt, &mut frame.stack)?;
+                debug_assert_ne!(*vt, ValueType::V128);
+                frame.scratch_values_raw[i] = frame.stack.pop_u64()?;
             }
         }
     }
@@ -356,19 +359,22 @@ fn execute_branch(frame: &mut Frame, types: &[FuncType], depth: usize) -> Result
     match (&target_signature, target_scope_type) {
         (TypeSignature::ValueType(vt), _) => {
             if vt != &ValueType::Unit && !frame.scratch_values_raw.is_empty() {
-                Value::push_raw_to(*vt, frame.scratch_values_raw[0], &mut frame.stack);
+                debug_assert_ne!(*vt, ValueType::V128);
+                frame.stack.push_u64(frame.scratch_values_raw[0]);
             }
         }
         (TypeSignature::Index(idx), ScopeType::Loop) => {
             let ft = &types[*idx as usize];
             for (i, vt) in ft.params.iter().enumerate() {
-                Value::push_raw_to(*vt, frame.scratch_values_raw[i], &mut frame.stack);
+                debug_assert_ne!(*vt, ValueType::V128);
+                frame.stack.push_u64(frame.scratch_values_raw[i]);
             }
         }
         (TypeSignature::Index(idx), _) => {
             let ft = &types[*idx as usize];
             for (i, vt) in ft.results.iter().enumerate() {
-                Value::push_raw_to(*vt, frame.scratch_values_raw[i], &mut frame.stack);
+                debug_assert_ne!(*vt, ValueType::V128);
+                frame.stack.push_u64(frame.scratch_values_raw[i]);
             }
         }
     }
@@ -481,13 +487,15 @@ fn execute<const TRACK_TICKS: bool>(
                 match &end_scope.signature {
                     TypeSignature::ValueType(vt) => {
                         if vt != &ValueType::Unit && !frame.scratch_values_raw.is_empty() {
-                            Value::push_raw_to(*vt, frame.scratch_values_raw[0], &mut frame.stack);
+                            debug_assert_ne!(*vt, ValueType::V128);
+                            frame.stack.push_u64(frame.scratch_values_raw[0]);
                         }
                     }
                     TypeSignature::Index(idx) => {
                         let ft = &types[*idx as usize];
                         for (i, vt) in ft.results.iter().enumerate() {
-                            Value::push_raw_to(*vt, frame.scratch_values_raw[i], &mut frame.stack);
+                            debug_assert_ne!(*vt, ValueType::V128);
+                            frame.stack.push_u64(frame.scratch_values_raw[i]);
                         }
                     }
                 }
@@ -571,27 +579,55 @@ fn execute<const TRACK_TICKS: bool>(
             Op::Return => return Ok((Continuation::DoneReturn, ticks_used)),
             Op::Call(c) => return Ok((Continuation::Call(*c), ticks_used)),
             Op::CallIndirect(_type_idx, table_idx) => {
+                let expected_type_idx = *_type_idx;
+                let table_idx = *table_idx;
                 // Pop the table index from the stack (the actual index to use)
                 let table_index = frame.stack.pop_u32()?;
+                let call_site_pc = pc;
 
                 // Look up the function reference in the specified table
-                if *table_idx as usize >= tables.len() {
+                if table_idx as usize >= tables.len() {
                     return Err(Fault::UndefinedElement);
                 }
-                let table = &tables[*table_idx as usize];
+                let table = &tables[table_idx as usize];
                 let table_elements = table_elements_unchecked(table);
 
                 if table_index as usize >= table_elements.len() {
                     return Err(Fault::UndefinedElement);
                 }
+                let table_generation = table.generation();
+
+                if let Some((cached_target_module_id, cached_target_func_idx)) = frame
+                    .lookup_call_indirect_cache(
+                        call_site_pc,
+                        table_idx,
+                        table_index,
+                        expected_type_idx,
+                        table_generation,
+                    )
+                {
+                    if cached_target_module_id == current_module_id
+                        || cached_target_module_id == current_module_owner_id
+                    {
+                        return Ok((Continuation::Call(cached_target_func_idx), ticks_used));
+                    }
+                    return Ok((
+                        Continuation::CallExternal {
+                            module_id: cached_target_module_id,
+                            func_id: cached_target_func_idx,
+                            expected_type: Some((current_module_id, expected_type_idx)),
+                        },
+                        ticks_used,
+                    ));
+                }
 
                 return match &table_elements[table_index as usize] {
                     None => Err(Fault::UninitializedElement),
                     Some(Value::FuncRef(Some(func_ref))) => {
-                        if *_type_idx as usize >= types.len() {
-                            return Err(Fault::UnresolvableTypeIndex(*_type_idx));
+                        if expected_type_idx as usize >= types.len() {
+                            return Err(Fault::UnresolvableTypeIndex(expected_type_idx));
                         }
-                        let expected_type = &types[*_type_idx as usize];
+                        let expected_type = &types[expected_type_idx as usize];
 
                         let target_module_id = func_ref.module_id;
                         if target_module_id == current_module_id
@@ -604,7 +640,7 @@ fn execute<const TRACK_TICKS: bool>(
                             if actual_type_idx >= types.len() {
                                 return Err(Fault::UnresolvableTypeIndex(actual_type_idx as u32));
                             }
-                            if actual_type_idx != *_type_idx as usize {
+                            if actual_type_idx != expected_type_idx as usize {
                                 let actual_type = &types[actual_type_idx];
                                 if expected_type.params != actual_type.params
                                     || expected_type.results != actual_type.results
@@ -612,13 +648,31 @@ fn execute<const TRACK_TICKS: bool>(
                                     return Err(Fault::IndirectCallTypeMismatch);
                                 }
                             }
+                            frame.update_call_indirect_cache(
+                                call_site_pc,
+                                table_idx,
+                                table_index,
+                                expected_type_idx,
+                                table_generation,
+                                func_ref.module_id,
+                                func_ref.func_idx,
+                            );
                             Ok((Continuation::Call(func_ref.func_idx), ticks_used))
                         } else {
+                            frame.update_call_indirect_cache(
+                                call_site_pc,
+                                table_idx,
+                                table_index,
+                                expected_type_idx,
+                                table_generation,
+                                func_ref.module_id,
+                                func_ref.func_idx,
+                            );
                             Ok((
                                 Continuation::CallExternal {
                                     module_id: target_module_id,
                                     func_id: func_ref.func_idx,
-                                    expected_type: Some((current_module_id, *_type_idx)),
+                                    expected_type: Some((current_module_id, expected_type_idx)),
                                 },
                                 ticks_used,
                             ))
@@ -1103,6 +1157,7 @@ fn execute<const TRACK_TICKS: bool>(
                     return Err(Fault::MemoryOutOfBounds);
                 }
                 table_elements[idx as usize] = Some(value);
+                table.bump_generation();
             }
             Op::TableInit(table_idx, elem_idx) => {
                 let len = frame.stack.pop_u32()?;
@@ -1122,6 +1177,9 @@ fn execute<const TRACK_TICKS: bool>(
                 let (dst_start, _) = validate_range(dst, len, table_elements.len())?;
                 for (i, value) in segment_values[src_start..src_end].iter().enumerate() {
                     table_elements[dst_start + i] = Some(*value);
+                }
+                if len != 0 {
+                    table.bump_generation();
                 }
             }
             Op::ElemDrop(elem_idx) => {
@@ -1146,12 +1204,16 @@ fn execute<const TRACK_TICKS: bool>(
                 }
 
                 if src_table_idx == dst_table_idx {
-                    let mut table_elements = tables[src_table_idx].elements.borrow_mut();
+                    let table = &mut tables[src_table_idx];
+                    let mut table_elements = table.elements.borrow_mut();
                     let (src_start, src_end) = validate_range(src, len, table_elements.len())?;
                     let (dst_start, _) = validate_range(dst, len, table_elements.len())?;
                     let copied = table_elements[src_start..src_end].to_vec();
                     for (i, value) in copied.into_iter().enumerate() {
                         table_elements[dst_start + i] = value;
+                    }
+                    if len != 0 {
+                        table.bump_generation();
                     }
                 } else {
                     let copied = {
@@ -1159,10 +1221,14 @@ fn execute<const TRACK_TICKS: bool>(
                         let (src_start, src_end) = validate_range(src, len, src_elements.len())?;
                         src_elements[src_start..src_end].to_vec()
                     };
-                    let mut dst_elements = tables[dst_table_idx].elements.borrow_mut();
+                    let dst_table = &mut tables[dst_table_idx];
+                    let mut dst_elements = dst_table.elements.borrow_mut();
                     let (dst_start, _) = validate_range(dst, len, dst_elements.len())?;
                     for (i, value) in copied.into_iter().enumerate() {
                         dst_elements[dst_start + i] = value;
+                    }
+                    if len != 0 {
+                        dst_table.bump_generation();
                     }
                 }
             }
@@ -1186,6 +1252,7 @@ fn execute<const TRACK_TICKS: bool>(
                     continue;
                 }
                 table_elements.resize(new_len, Some(fill_value));
+                table.bump_generation();
                 frame.stack.push_u32(old_len as u32);
             }
             Op::TableSize(table_idx) => {
@@ -1207,6 +1274,9 @@ fn execute<const TRACK_TICKS: bool>(
                 let (dst_start, dst_end) = validate_range(dst, len, table_elements.len())?;
                 for slot in &mut table_elements[dst_start..dst_end] {
                     *slot = Some(value);
+                }
+                if len != 0 {
+                    table.bump_generation();
                 }
             }
             Op::LoadI32(addr) => {
@@ -2583,6 +2653,7 @@ pub(crate) fn eval_init_expr(
         pc: 0,
         control_stack: Vec::with_capacity(8),
         scratch_values_raw: Vec::with_capacity(8),
+        call_indirect_cache: Vec::with_capacity(4),
     };
     // This little fragment, it doesn't get much memory and doesn't get *any* globals.
     // TODO: I don't actually know what a reasonable amount of memory is, so we'll just default
@@ -2914,6 +2985,7 @@ impl ExecutionState {
                     pc: 0,
                     control_stack: Vec::with_capacity(8),
                     scratch_values_raw: Vec::with_capacity(8),
+                    call_indirect_cache: Vec::with_capacity(4),
                 };
                 for arg in args {
                     arg.push_to(&mut frame.stack);
@@ -3031,36 +3103,27 @@ impl ExecutionState {
                                 [] => {}
                                 [ValueType::Unit] => {}
                                 [rt] => {
-                                    let val = if *rt == ValueType::V128 {
-                                        Value::pop_raw_from(*rt, &mut completed_frame.stack)
-                                            .map_err(ExecError::ExecutionFault)?
-                                    } else {
-                                        completed_frame
-                                            .stack
-                                            .pop_u64()
-                                            .map_err(ExecError::ExecutionFault)?
-                                    };
-                                    if *rt == ValueType::V128 {
-                                        Value::push_raw_to(*rt, val, &mut caller_frame.stack);
-                                    } else {
-                                        caller_frame.stack.push_u64(val);
-                                    }
+                                    debug_assert_ne!(*rt, ValueType::V128);
+                                    let val = completed_frame
+                                        .stack
+                                        .pop_u64()
+                                        .map_err(ExecError::ExecutionFault)?;
+                                    caller_frame.stack.push_u64(val);
                                 }
                                 _ => {
                                     completed_frame
                                         .scratch_values_raw
                                         .resize(return_types.len(), 0);
                                     for (i, rt) in return_types.iter().enumerate().rev() {
-                                        completed_frame.scratch_values_raw[i] =
-                                            Value::pop_raw_from(*rt, &mut completed_frame.stack)
-                                                .map_err(ExecError::ExecutionFault)?;
+                                        debug_assert_ne!(*rt, ValueType::V128);
+                                        completed_frame.scratch_values_raw[i] = completed_frame
+                                            .stack
+                                            .pop_u64()
+                                            .map_err(ExecError::ExecutionFault)?;
                                     }
                                     for (i, rt) in return_types.iter().enumerate() {
-                                        Value::push_raw_to(
-                                            *rt,
-                                            completed_frame.scratch_values_raw[i],
-                                            &mut caller_frame.stack,
-                                        );
+                                        debug_assert_ne!(*rt, ValueType::V128);
+                                        caller_frame.stack.push_u64(completed_frame.scratch_values_raw[i]);
                                     }
                                 }
                             }
@@ -3072,15 +3135,11 @@ impl ExecutionState {
                                 [] => {}
                                 [ValueType::Unit] => {}
                                 [rt] => {
-                                    let val = if *rt == ValueType::V128 {
-                                        Value::pop_raw_from(*rt, &mut completed_frame.stack)
-                                            .map_err(ExecError::ExecutionFault)?
-                                    } else {
-                                        completed_frame
-                                            .stack
-                                            .pop_u64()
-                                            .map_err(ExecError::ExecutionFault)?
-                                    };
+                                    debug_assert_ne!(*rt, ValueType::V128);
+                                    let val = completed_frame
+                                        .stack
+                                        .pop_u64()
+                                        .map_err(ExecError::ExecutionFault)?;
                                     final_values.push(Value::from_raw(*rt, val));
                                 }
                                 _ => {
@@ -3088,11 +3147,14 @@ impl ExecutionState {
                                         .scratch_values_raw
                                         .resize(return_types.len(), 0);
                                     for (i, rt) in return_types.iter().enumerate().rev() {
-                                        completed_frame.scratch_values_raw[i] =
-                                            Value::pop_raw_from(*rt, &mut completed_frame.stack)
-                                                .map_err(ExecError::ExecutionFault)?;
+                                        debug_assert_ne!(*rt, ValueType::V128);
+                                        completed_frame.scratch_values_raw[i] = completed_frame
+                                            .stack
+                                            .pop_u64()
+                                            .map_err(ExecError::ExecutionFault)?;
                                     }
                                     for (i, rt) in return_types.iter().enumerate() {
+                                        debug_assert_ne!(*rt, ValueType::V128);
                                         final_values.push(Value::from_raw(
                                             *rt,
                                             completed_frame.scratch_values_raw[i],

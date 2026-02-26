@@ -19,7 +19,7 @@ use crate::memory::Memory;
 use crate::module::{Data, ReferenceType};
 use crate::stack::Stack;
 use crate::{DecodeError, Module, TypeSignature, ValueType, VectorMemory};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
@@ -70,6 +70,19 @@ pub struct TableInstance {
     pub elements: Rc<RefCell<Vec<Option<Value>>>>,
     pub ref_type: ReferenceType,
     pub limits: (u32, Option<u32>),
+    pub generation: Rc<Cell<u32>>,
+}
+
+impl TableInstance {
+    #[inline(always)]
+    pub fn generation(&self) -> u32 {
+        self.generation.get()
+    }
+
+    #[inline(always)]
+    pub fn bump_generation(&self) {
+        self.generation.set(self.generation.get().wrapping_add(1));
+    }
 }
 
 #[derive(Debug)]
@@ -442,6 +455,7 @@ fn mk_instance_internal(
             elements: Rc::new(RefCell::new(elements)),
             ref_type: t_decl.ty,
             limits: (min_size, max_size),
+            generation: Rc::new(Cell::new(0)),
         });
     }
 
@@ -591,6 +605,10 @@ fn mk_instance_internal(
                 }
                 for (i, value) in segment_values.iter().enumerate() {
                     table_elements[offset + i] = Some(*value);
+                }
+                drop(table_elements);
+                if !segment_values.is_empty() {
+                    tables[table_idx].bump_generation();
                 }
             }
         }
@@ -935,6 +953,7 @@ impl Instance {
             pc: 0,
             control_stack: Vec::with_capacity(8),
             scratch_values_raw: Vec::with_capacity(8),
+            call_indirect_cache: Vec::with_capacity(4),
         };
 
         // Add function scope for proper control flow management.
@@ -989,6 +1008,7 @@ impl Instance {
             pc: 0,
             control_stack: Vec::with_capacity(8),
             scratch_values_raw: Vec::with_capacity(8),
+            call_indirect_cache: Vec::with_capacity(4),
         };
 
         frame.reset_for_function(self.function_scope_signatures[index], program.ops.len());
@@ -1034,6 +1054,7 @@ impl Instance {
             pc: 0,
             control_stack: Vec::with_capacity(8),
             scratch_values_raw: Vec::with_capacity(8),
+            call_indirect_cache: Vec::with_capacity(4),
         };
 
         frame.reset_for_function(
@@ -1089,6 +1110,7 @@ impl Instance {
 
         if !Rc::ptr_eq(&frame.program, program) {
             frame.program = Rc::clone(program);
+            frame.call_indirect_cache.clear();
         }
         frame.reset_for_function(self.function_scope_signatures[index], program.ops.len());
         Ok(())
@@ -1133,6 +1155,7 @@ impl Instance {
 
         if !Rc::ptr_eq(&frame.program, program) {
             frame.program = Rc::clone(program);
+            frame.call_indirect_cache.clear();
         }
         frame.reset_for_function(
             *self.function_scope_signatures.get_unchecked(local_idx),
@@ -1204,6 +1227,7 @@ impl Instance {
         let program = &self.programs[local_idx];
         if !Rc::ptr_eq(&frame.program, program) {
             frame.program = Rc::clone(program);
+            frame.call_indirect_cache.clear();
         }
         frame.reset_for_function(self.function_scope_signatures[local_idx], program.ops.len());
         Ok(())
