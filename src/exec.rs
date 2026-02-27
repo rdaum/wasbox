@@ -11,8 +11,8 @@
 // this program. If not, see <https://www.gnu.org/licenses/>.
 //
 
-use crate::decode::{decode, Program, ScopeType};
-use crate::frame::Frame;
+use crate::decode::{decode, ScopeType};
+use crate::frame::{Frame, ProgramKey};
 use crate::import::{HostFunction, ImportResolver, ImportedFunction};
 use crate::instance::{LinkError, TableInstance, WASM_PAGE_SIZE};
 use crate::memory::Memory;
@@ -383,7 +383,7 @@ fn execute_branch(frame: &mut Frame, types: &[FuncType], depth: usize) -> Result
     match target_scope_type {
         ScopeType::Function => {
             // Branching to function scope means returning from the function
-            frame.pc = frame.program.ops.len(); // This will cause the main loop to exit
+            frame.pc = frame.program().ops.len(); // This will cause the main loop to exit
         }
         ScopeType::Loop => {
             // Branching to loop label jumps to loop body (immediately after StartScope).
@@ -443,9 +443,11 @@ fn execute<const TRACK_TICKS: bool>(
 ) -> Result<(Continuation, usize), Fault> {
     let mut ticks_used = 0;
     loop {
+        // SAFETY: `program_ptr` is valid for the frame lifetime (instance-owned or frame-owned).
+        let program = unsafe { &*frame.program_ptr() };
         // Pull next opcode from the program
         let pc = frame.pc;
-        if pc >= frame.program.ops.len() {
+        if pc >= program.ops.len() {
             // We've reached the end of the program
             return Ok((Continuation::ProgramEnd, ticks_used));
         }
@@ -456,7 +458,7 @@ fn execute<const TRACK_TICKS: bool>(
             }
         }
         frame.pc += 1;
-        let op_ref = &frame.program.ops[pc];
+        let op_ref = &program.ops[pc];
 
         // Hot-path dispatch without cloning.
         match op_ref {
@@ -468,7 +470,7 @@ fn execute<const TRACK_TICKS: bool>(
                         return Err(Fault::UnresolvableTypeIndex(idx));
                     }
                 }
-                let end_pc = frame.program.scope_end_jumps[pc];
+                let end_pc = program.scope_end_jumps[pc];
                 if end_pc == usize::MAX {
                     return Err(Fault::Unreachable);
                 }
@@ -504,7 +506,7 @@ fn execute<const TRACK_TICKS: bool>(
             Op::If => {
                 let condition = frame.stack.pop_u32()?;
                 if condition == 0 {
-                    let jump_target = frame.program.if_else_jumps[pc];
+                    let jump_target = program.if_else_jumps[pc];
                     if jump_target == usize::MAX {
                         return Err(Fault::Unreachable);
                     }
@@ -513,7 +515,7 @@ fn execute<const TRACK_TICKS: bool>(
                 continue;
             }
             Op::Else => {
-                let jump_target = frame.program.if_else_jumps[pc];
+                let jump_target = program.if_else_jumps[pc];
                 if jump_target == usize::MAX {
                     return Err(Fault::Unreachable);
                 }
@@ -537,7 +539,7 @@ fn execute<const TRACK_TICKS: bool>(
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
                 debug_assert_eq!(
-                    frame.program.local_types[*local_idx as usize],
+                    program.local_types[*local_idx as usize],
                     ValueType::I64
                 );
                 let v = frame.locals[*local_idx as usize];
@@ -551,11 +553,11 @@ fn execute<const TRACK_TICKS: bool>(
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
                 debug_assert_eq!(
-                    frame.program.local_types[*lhs_local as usize],
+                    program.local_types[*lhs_local as usize],
                     ValueType::I32
                 );
                 debug_assert_eq!(
-                    frame.program.local_types[*rhs_local as usize],
+                    program.local_types[*rhs_local as usize],
                     ValueType::I32
                 );
                 let lhs = frame.locals[*lhs_local as usize] as u32;
@@ -566,7 +568,7 @@ fn execute<const TRACK_TICKS: bool>(
                 continue;
             }
             Op::BrTable(idx) => {
-                let (table, default) = &frame.program.br_tables[*idx as usize];
+                let (table, default) = &program.br_tables[*idx as usize];
                 let index = frame.stack.pop_u32()? as usize;
                 let depth = if index < table.len() {
                     table[index]
@@ -687,7 +689,7 @@ fn execute<const TRACK_TICKS: bool>(
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
                 let val = frame.locals[*idx as usize];
-                let ty = frame.program.local_types[*idx as usize];
+                let ty = program.local_types[*idx as usize];
                 Value::push_raw_to(ty, val, &mut frame.stack);
                 continue;
             }
@@ -695,7 +697,7 @@ fn execute<const TRACK_TICKS: bool>(
                 if *idx as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let ty = frame.program.local_types[*idx as usize];
+                let ty = program.local_types[*idx as usize];
                 let val = Value::pop_raw_from(ty, &mut frame.stack)?;
                 frame.locals[*idx as usize] = val;
                 continue;
@@ -704,7 +706,7 @@ fn execute<const TRACK_TICKS: bool>(
                 if *idx as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                let ty = frame.program.local_types[*idx as usize];
+                let ty = program.local_types[*idx as usize];
                 let val = Value::top_raw_of(ty, &mut frame.stack)?;
                 frame.locals[*idx as usize] = val;
                 continue;
@@ -713,7 +715,7 @@ fn execute<const TRACK_TICKS: bool>(
                 if *src as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                debug_assert_eq!(frame.program.local_types[*src as usize], ValueType::I32);
+                debug_assert_eq!(program.local_types[*src as usize], ValueType::I32);
                 let v = frame.locals[*src as usize] as i32;
                 frame
                     .stack
@@ -724,8 +726,8 @@ fn execute<const TRACK_TICKS: bool>(
                 if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                debug_assert_eq!(frame.program.local_types[*src as usize], ValueType::I32);
-                debug_assert_eq!(frame.program.local_types[*dst as usize], ValueType::I32);
+                debug_assert_eq!(program.local_types[*src as usize], ValueType::I32);
+                debug_assert_eq!(program.local_types[*dst as usize], ValueType::I32);
                 let v = frame.locals[*src as usize] as i32;
                 frame.locals[*dst as usize] = v.wrapping_mul(*mul).wrapping_add(*add) as i64 as u64;
                 continue;
@@ -734,8 +736,8 @@ fn execute<const TRACK_TICKS: bool>(
                 if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                debug_assert_eq!(frame.program.local_types[*src as usize], ValueType::I32);
-                debug_assert_eq!(frame.program.local_types[*dst as usize], ValueType::I32);
+                debug_assert_eq!(program.local_types[*src as usize], ValueType::I32);
+                debug_assert_eq!(program.local_types[*dst as usize], ValueType::I32);
                 let v = frame.locals[*src as usize] as i32;
                 frame.locals[*dst as usize] = v.wrapping_add(*add) as i64 as u64;
                 continue;
@@ -747,9 +749,9 @@ fn execute<const TRACK_TICKS: bool>(
                 {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                debug_assert_eq!(frame.program.local_types[*a as usize], ValueType::I64);
-                debug_assert_eq!(frame.program.local_types[*b as usize], ValueType::I64);
-                debug_assert_eq!(frame.program.local_types[*dst as usize], ValueType::I64);
+                debug_assert_eq!(program.local_types[*a as usize], ValueType::I64);
+                debug_assert_eq!(program.local_types[*b as usize], ValueType::I64);
+                debug_assert_eq!(program.local_types[*dst as usize], ValueType::I64);
                 let av = frame.locals[*a as usize];
                 let bv = frame.locals[*b as usize];
                 frame.locals[*dst as usize] = av.wrapping_add(bv);
@@ -759,8 +761,8 @@ fn execute<const TRACK_TICKS: bool>(
                 if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                debug_assert_eq!(frame.program.local_types[*src as usize], ValueType::I64);
-                debug_assert_eq!(frame.program.local_types[*dst as usize], ValueType::I64);
+                debug_assert_eq!(program.local_types[*src as usize], ValueType::I64);
+                debug_assert_eq!(program.local_types[*dst as usize], ValueType::I64);
                 let v = frame.locals[*src as usize];
                 frame.locals[*dst as usize] = v.wrapping_sub(*c as u64);
                 continue;
@@ -2646,15 +2648,7 @@ pub(crate) fn eval_init_expr(
     expression.push(0x0b);
     let mut const_program = decode(&expression).unwrap();
     const_program.return_types = vec![return_type];
-    let mut global_exec_frame = Frame {
-        locals: vec![0; 0],
-        program: Rc::new(const_program),
-        stack: Stack::new(),
-        pc: 0,
-        control_stack: Vec::with_capacity(8),
-        scratch_values_raw: Vec::with_capacity(8),
-        call_indirect_cache: Vec::with_capacity(4),
-    };
+    let mut global_exec_frame = Frame::for_owned_program(vec![], Rc::new(const_program));
     // This little fragment, it doesn't get much memory and doesn't get *any* globals.
     // TODO: I don't actually know what a reasonable amount of memory is, so we'll just default
     //   to one page.
@@ -2817,42 +2811,42 @@ impl ExecutionState {
 
     #[inline(always)]
     fn recycle_frame(&mut self, frame: Frame) {
+        if !matches!(frame.program_key, ProgramKey::Local { .. }) {
+            return;
+        }
         if self.recycled_frames.len() < FRAME_POOL_LIMIT {
             self.recycled_frames.push(frame);
         }
     }
 
     #[inline(always)]
-    fn pop_recycled_frame_for_program_ptr(
-        &mut self,
-        program_ptr: *const Program,
-    ) -> Option<Frame> {
+    fn pop_recycled_frame_for_program_key(&mut self, program_key: ProgramKey) -> Option<Frame> {
         let len = self.recycled_frames.len();
         if len == 0 {
             return None;
         }
 
-        if Rc::as_ptr(&self.recycled_frames[len - 1].program) == program_ptr {
+        if self.recycled_frames[len - 1].program_key == program_key {
             return self.recycled_frames.pop();
         }
 
         let idx = self.recycled_frames[..len - 1]
             .iter()
-            .rposition(|f| Rc::as_ptr(&f.program) == program_ptr)?;
+            .rposition(|f| f.program_key == program_key)?;
         Some(self.recycled_frames.swap_remove(idx))
     }
 
     #[inline(always)]
-    fn local_program_ptr(module: &Instance, funcidx: u32) -> Result<*const Program, Fault> {
+    fn local_program_key(module: &Instance, funcidx: u32) -> Result<ProgramKey, Fault> {
         if funcidx < module.num_imported_functions {
             return Err(Fault::GlobalIndexOutOfBounds);
         }
         let local_idx = (funcidx - module.num_imported_functions) as usize;
-        let program = module
+        module
             .programs
             .get(local_idx)
             .ok_or(Fault::GlobalIndexOutOfBounds)?;
-        Ok(Rc::as_ptr(program))
+        Ok(ProgramKey::local(module.owner_id, local_idx as u32))
     }
 
     fn clear_and_recycle_active_frames(&mut self) {
@@ -2928,8 +2922,21 @@ impl ExecutionState {
     }
 
     pub fn take_module(&mut self, module_id: u32) -> Option<Instance> {
+        if self.frame_stack.iter().any(|(id, _)| *id == module_id) {
+            return None;
+        }
         let instance = self.modules.remove(&module_id)?;
         self.module_owner_map.remove(&instance.owner_id);
+        let owner_id = instance.owner_id;
+        self.recycled_frames.retain(|frame| {
+            !matches!(
+                frame.program_key,
+                ProgramKey::Local {
+                    owner_id: frame_owner,
+                    ..
+                } if frame_owner == owner_id
+            )
+        });
         Some(instance)
     }
 
@@ -2978,15 +2985,7 @@ impl ExecutionState {
                 program.return_types = func_type.results.clone();
                 program.push(Op::Call(funcidx));
 
-                let mut frame = Frame {
-                    locals: vec![],
-                    program: Rc::new(program),
-                    stack: Stack::new(),
-                    pc: 0,
-                    control_stack: Vec::with_capacity(8),
-                    scratch_values_raw: Vec::with_capacity(8),
-                    call_indirect_cache: Vec::with_capacity(4),
-                };
+                let mut frame = Frame::for_owned_program(vec![], Rc::new(program));
                 for arg in args {
                     arg.push_to(&mut frame.stack);
                 }
@@ -2995,14 +2994,14 @@ impl ExecutionState {
             }
         }
 
-        let program_ptr = {
+        let program_key = {
             let instance = self
                 .modules
                 .get(&module_id)
                 .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
-            Self::local_program_ptr(instance, funcidx).map_err(ExecError::ExecutionFault)?
+            Self::local_program_key(instance, funcidx).map_err(ExecError::ExecutionFault)?
         };
-        let recycled_frame = self.pop_recycled_frame_for_program_ptr(program_ptr);
+        let recycled_frame = self.pop_recycled_frame_for_program_key(program_key);
         let instance = self
             .modules
             .get(&module_id)
@@ -3095,7 +3094,7 @@ impl ExecutionState {
                     Continuation::ProgramEnd | Continuation::DoneReturn => {
                         // Handle function return
                         let (_, mut completed_frame) = self.frame_stack.pop().unwrap();
-                        let return_types = &completed_frame.program.return_types;
+                        let return_types = completed_frame.program().return_types.clone();
                         completed_frame.scratch_values_raw.clear();
 
                         if let Some((_, caller_frame)) = self.frame_stack.last_mut() {
@@ -3180,11 +3179,10 @@ impl ExecutionState {
                             if local_idx >= module.programs.len() {
                                 return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
                             }
-                            let target_program_ptr = Rc::as_ptr(unsafe {
-                                module.programs.get_unchecked(local_idx)
-                            });
+                            let target_program_key =
+                                ProgramKey::local(module.owner_id, local_idx as u32);
                             let recycled_frame =
-                                self.pop_recycled_frame_for_program_ptr(target_program_ptr);
+                                self.pop_recycled_frame_for_program_key(target_program_key);
                             let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                             let module = unsafe { &*module_ptr };
                             let frame = if let Some(mut frame) = recycled_frame {
@@ -3252,11 +3250,11 @@ impl ExecutionState {
                             }
                         } else {
                             // Local function call
-                            let target_program_ptr =
-                                Self::local_program_ptr(module, funcidx)
+                            let target_program_key =
+                                Self::local_program_key(module, funcidx)
                                     .map_err(ExecError::ExecutionFault)?;
                             let recycled_frame =
-                                self.pop_recycled_frame_for_program_ptr(target_program_ptr);
+                                self.pop_recycled_frame_for_program_key(target_program_key);
                             let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                             let module = unsafe { &*module_ptr };
                             // Create new frame for the called function
@@ -3363,10 +3361,11 @@ impl ExecutionState {
                             }
                         } else {
                             // Create new frame in target module.
-                            let target_program_ptr = Self::local_program_ptr(target_module, func_id)
+                            let target_program_key =
+                                Self::local_program_key(target_module, func_id)
                                 .map_err(ExecError::ExecutionFault)?;
                             let recycled_frame =
-                                self.pop_recycled_frame_for_program_ptr(target_program_ptr);
+                                self.pop_recycled_frame_for_program_key(target_program_key);
                             let (_, current_frame) = self.frame_stack.last_mut().unwrap();
                             let target_module = self
                                 .modules

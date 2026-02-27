@@ -17,6 +17,27 @@ use crate::stack::Stack;
 use crate::{FuncType, TypeSignature, ValueType};
 use std::rc::Rc;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProgramKey {
+    Local { owner_id: u32, local_idx: u32 },
+    Ephemeral,
+}
+
+impl ProgramKey {
+    #[inline(always)]
+    pub const fn local(owner_id: u32, local_idx: u32) -> Self {
+        Self::Local {
+            owner_id,
+            local_idx,
+        }
+    }
+
+    #[inline(always)]
+    pub const fn ephemeral() -> Self {
+        Self::Ephemeral
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct CallIndirectCacheLine {
     pub valid: bool,
@@ -76,7 +97,9 @@ impl CallIndirectCacheEntry {
 
 pub struct Frame {
     pub locals: Vec<u64>,
-    pub program: Rc<Program>,
+    pub program_key: ProgramKey,
+    program_ptr: *const Program,
+    owned_program: Option<Rc<Program>>,
     pub stack: Stack,
     pub pc: usize,
     pub control_stack: Vec<Control>,
@@ -94,15 +117,71 @@ pub struct Control {
 
 impl Frame {
     pub fn new(num_locals: usize, program: Rc<Program>) -> Self {
+        Self::for_owned_program(vec![0; num_locals], program)
+    }
+
+    pub fn for_borrowed_program(locals: Vec<u64>, program_key: ProgramKey, program: &Rc<Program>) -> Self {
         Frame {
-            locals: vec![0; num_locals],
+            locals,
+            program_key,
+            program_ptr: Rc::as_ptr(program),
+            owned_program: None,
             stack: Stack::new(),
             pc: 0,
-            program,
             control_stack: Vec::with_capacity(8),
             scratch_values_raw: Vec::with_capacity(8),
             call_indirect_cache: Vec::with_capacity(4),
         }
+    }
+
+    pub fn for_owned_program(locals: Vec<u64>, program: Rc<Program>) -> Self {
+        let program_ptr = Rc::as_ptr(&program);
+        Frame {
+            locals,
+            program_key: ProgramKey::ephemeral(),
+            program_ptr,
+            owned_program: Some(program),
+            stack: Stack::new(),
+            pc: 0,
+            control_stack: Vec::with_capacity(8),
+            scratch_values_raw: Vec::with_capacity(8),
+            call_indirect_cache: Vec::with_capacity(4),
+        }
+    }
+
+    #[inline(always)]
+    pub fn program(&self) -> &Program {
+        // SAFETY: `program_ptr` points to either:
+        // - an `Rc<Program>` owned by the enclosing `Instance` (local frames), or
+        // - `owned_program` in this frame (ephemeral frames).
+        unsafe { &*self.program_ptr }
+    }
+
+    #[inline(always)]
+    pub fn program_ptr(&self) -> *const Program {
+        self.program_ptr
+    }
+
+    #[inline(always)]
+    pub fn set_borrowed_program(&mut self, program_key: ProgramKey, program: &Rc<Program>) {
+        self.owned_program = None;
+        self.set_program_ptr(program_key, Rc::as_ptr(program));
+    }
+
+    #[inline(always)]
+    pub fn set_owned_program(&mut self, program: Rc<Program>) {
+        let program_ptr = Rc::as_ptr(&program);
+        self.owned_program = Some(program);
+        self.set_program_ptr(ProgramKey::ephemeral(), program_ptr);
+    }
+
+    #[inline(always)]
+    fn set_program_ptr(&mut self, program_key: ProgramKey, program_ptr: *const Program) {
+        if self.program_key != program_key || self.program_ptr != program_ptr {
+            self.call_indirect_cache.clear();
+        }
+        self.program_key = program_key;
+        self.program_ptr = program_ptr;
     }
 
     #[inline(always)]
@@ -253,7 +332,7 @@ impl Frame {
             return Err(Fault::LocalIndexOutOfBounds);
         }
         let val = self.locals[local_index as usize];
-        let ty = self.program.local_types[local_index as usize];
+        let ty = self.program().local_types[local_index as usize];
         Value::push_raw_to(ty, val, &mut self.stack);
         Ok(())
     }
@@ -262,7 +341,7 @@ impl Frame {
         if local_index as usize >= self.locals.len() {
             return Err(Fault::LocalIndexOutOfBounds);
         }
-        let ty = self.program.local_types[local_index as usize];
+        let ty = self.program().local_types[local_index as usize];
 
         let val = if pop {
             Value::pop_raw_from(ty, &mut self.stack)?

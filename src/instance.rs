@@ -13,7 +13,7 @@
 
 use crate::decode::{decode, Program};
 use crate::exec::{eval_init_expr, register_detached_instance, Fault, FuncRef, GlobalVar, Value};
-use crate::frame::Frame;
+use crate::frame::{Frame, ProgramKey};
 use crate::import::{ImportResolver, ImportedFunction};
 use crate::memory::Memory;
 use crate::module::{Data, ReferenceType};
@@ -946,15 +946,11 @@ impl Instance {
 
         locals.extend_from_slice(&self.program_local_defaults[index]);
 
-        let mut frame = Frame {
+        let mut frame = Frame::for_borrowed_program(
             locals,
-            program: Rc::clone(program),
-            stack: Stack::new(),
-            pc: 0,
-            control_stack: Vec::with_capacity(8),
-            scratch_values_raw: Vec::with_capacity(8),
-            call_indirect_cache: Vec::with_capacity(4),
-        };
+            ProgramKey::local(self.owner_id, index as u32),
+            program,
+        );
 
         // Add function scope for proper control flow management.
         frame.reset_for_function(self.function_scope_signatures[index], program.ops.len());
@@ -1001,15 +997,11 @@ impl Instance {
             locals[param_count..].copy_from_slice(local_defaults);
         }
 
-        let mut frame = Frame {
+        let mut frame = Frame::for_borrowed_program(
             locals,
-            program: Rc::clone(program),
-            stack: Stack::new(),
-            pc: 0,
-            control_stack: Vec::with_capacity(8),
-            scratch_values_raw: Vec::with_capacity(8),
-            call_indirect_cache: Vec::with_capacity(4),
-        };
+            ProgramKey::local(self.owner_id, index as u32),
+            program,
+        );
 
         frame.reset_for_function(self.function_scope_signatures[index], program.ops.len());
         Ok(frame)
@@ -1047,15 +1039,11 @@ impl Instance {
             locals[param_count..].copy_from_slice(local_defaults);
         }
 
-        let mut frame = Frame {
+        let mut frame = Frame::for_borrowed_program(
             locals,
-            program: Rc::clone(program),
-            stack: Stack::new(),
-            pc: 0,
-            control_stack: Vec::with_capacity(8),
-            scratch_values_raw: Vec::with_capacity(8),
-            call_indirect_cache: Vec::with_capacity(4),
-        };
+            ProgramKey::local(self.owner_id, local_idx as u32),
+            program,
+        );
 
         frame.reset_for_function(
             *self.function_scope_signatures.get_unchecked(local_idx),
@@ -1108,9 +1096,9 @@ impl Instance {
             frame.locals[param_count..].copy_from_slice(local_defaults);
         }
 
-        if !Rc::ptr_eq(&frame.program, program) {
-            frame.program = Rc::clone(program);
-            frame.call_indirect_cache.clear();
+        let program_key = ProgramKey::local(self.owner_id, index as u32);
+        if frame.program_key != program_key {
+            frame.set_borrowed_program(program_key, program);
         }
         frame.reset_for_function(self.function_scope_signatures[index], program.ops.len());
         Ok(())
@@ -1153,9 +1141,9 @@ impl Instance {
             frame.locals[param_count..].copy_from_slice(local_defaults);
         }
 
-        if !Rc::ptr_eq(&frame.program, program) {
-            frame.program = Rc::clone(program);
-            frame.call_indirect_cache.clear();
+        let program_key = ProgramKey::local(self.owner_id, local_idx as u32);
+        if frame.program_key != program_key {
+            frame.set_borrowed_program(program_key, program);
         }
         frame.reset_for_function(
             *self.function_scope_signatures.get_unchecked(local_idx),
@@ -1225,9 +1213,9 @@ impl Instance {
         }
 
         let program = &self.programs[local_idx];
-        if !Rc::ptr_eq(&frame.program, program) {
-            frame.program = Rc::clone(program);
-            frame.call_indirect_cache.clear();
+        let program_key = ProgramKey::local(self.owner_id, local_idx as u32);
+        if frame.program_key != program_key {
+            frame.set_borrowed_program(program_key, program);
         }
         frame.reset_for_function(self.function_scope_signatures[local_idx], program.ops.len());
         Ok(())
