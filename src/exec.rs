@@ -440,6 +440,17 @@ fn execute<const TRACK_TICKS: bool>(
     current_module_owner_id: u32,
 ) -> Result<(Continuation, usize), Fault> {
     let mut ticks_used = 0;
+
+    // Fast path: cache memory 0's data slice to avoid dynamic dispatch and bounds checks on hot path
+    // We update this cache when MemoryGrow happens.
+    // Use raw pointer to get around borrow checker, we only access it via `unsafe { &*memory0_data_ptr }`
+    // when we know memory is valid.
+    let mut memory0_data_ptr: *mut [u8] = if !memories.is_empty() {
+        memories[0].data_mut()
+    } else {
+        &mut []
+    };
+
     loop {
         // SAFETY: `program_ptr` is valid for the frame lifetime (instance-owned or frame-owned).
         let program = unsafe { &*frame.program_ptr() };
@@ -1278,34 +1289,64 @@ fn execute<const TRACK_TICKS: bool>(
                 let memory = memories
                     .get_mut(memarg.memory as usize)
                     .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_i32(addr)?;
+                let data = memory.data();
+                let end = addr.wrapping_add(4);
+                if addr > end || end > data.len() {
+                    return Err(Fault::MemoryOutOfBounds);
+                }
+                let value =
+                    i32::from_le_bytes(unsafe { *(data.as_ptr().add(addr) as *const [u8; 4]) });
                 frame.stack.push_i32(value);
             }
             Op::LoadI64(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_i64(addr)?;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u64(data, addr)? as i64;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u64(data, addr)? as i64;
+                    value
+                };
                 frame.stack.push_i64(value);
             }
             Op::LoadF32(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_f32(addr)?;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = f32::from_bits(mem_read_u32(data, addr)?);
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = f32::from_bits(mem_read_u32(data, addr)?);
+                    value
+                };
                 frame.stack.push_f32(value);
             }
             Op::LoadF64(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_f64(addr)?;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = f64::from_bits(mem_read_u64(data, addr)?);
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = f64::from_bits(mem_read_u64(data, addr)?);
+                    value
+                };
                 frame.stack.push_f64(value);
             }
 
@@ -1313,46 +1354,86 @@ fn execute<const TRACK_TICKS: bool>(
             Op::Load8SE(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_u8(addr)? as i8 as i32;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u8(data, addr)? as i8 as i32;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u8(data, addr)? as i8 as i32;
+                    value
+                };
                 frame.stack.push_i32(value);
             }
             Op::Load16Se(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_u16(addr)? as i16 as i32;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u16(data, addr)? as i16 as i32;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u16(data, addr)? as i16 as i32;
+                    value
+                };
                 frame.stack.push_i32(value);
             }
             Op::Load8I64Se(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_u8(addr)? as i8 as i64;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u8(data, addr)? as i8 as i64;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u8(data, addr)? as i8 as i64;
+                    value
+                };
                 frame.stack.push_i64(value);
             }
             Op::Load16I64Se(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_u16(addr)? as i16 as i64;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u16(data, addr)? as i16 as i64;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u16(data, addr)? as i16 as i64;
+                    value
+                };
                 frame.stack.push_i64(value);
             }
             Op::Load32I64Se(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_u32(addr)? as i32 as i64;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u32(data, addr)? as i32 as i64;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u32(data, addr)? as i32 as i64;
+                    value
+                };
                 frame.stack.push_i64(value);
             }
 
@@ -1360,83 +1441,147 @@ fn execute<const TRACK_TICKS: bool>(
             Op::Load8Ze(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_u8(addr)? as u32;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u8(data, addr)? as u32;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u8(data, addr)? as u32;
+                    value
+                };
                 frame.stack.push_u32(value);
             }
             Op::Load16Ze(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_u16(addr)? as u32;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u16(data, addr)? as u32;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u16(data, addr)? as u32;
+                    value
+                };
                 frame.stack.push_u32(value);
             }
             Op::Load8I64Ze(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_u8(addr)? as u64;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u8(data, addr)? as u64;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u8(data, addr)? as u64;
+                    value
+                };
                 frame.stack.push_u64(value);
             }
             Op::Load16I64Ze(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_u16(addr)? as u64;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u16(data, addr)? as u64;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u16(data, addr)? as u64;
+                    value
+                };
                 frame.stack.push_u64(value);
             }
             Op::Load32I64Ze(addr) => {
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                let value = memory.get_u32(addr)? as u64;
+                let value = if memarg.memory == 0 {
+                    let data = unsafe { &*memory0_data_ptr };
+                    let value = mem_read_u32(data, addr)? as u64;
+                    value
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data();
+                    let value = mem_read_u32(data, addr)? as u64;
+                    value
+                };
                 frame.stack.push_u64(value);
             }
             Op::StoreI32(addr) => {
                 let value = frame.stack.pop_i32()?;
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                memory.set_i32(addr, value)?;
+                if memarg.memory == 0 {
+                    let data = unsafe { &mut *memory0_data_ptr };
+                    mem_write_u32(data, addr, value as u32)?;
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data_mut();
+                    mem_write_u32(data, addr, value as u32)?;
+                }
             }
             Op::StoreI64(addr) => {
                 let value = frame.stack.pop_i64()?;
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                memory.set_i64(addr, value)?;
+                if memarg.memory == 0 {
+                    let data = unsafe { &mut *memory0_data_ptr };
+                    mem_write_u64(data, addr, value as u64)?;
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data_mut();
+                    mem_write_u64(data, addr, value as u64)?;
+                }
             }
             Op::StoreF32(addr) => {
                 let value = frame.stack.pop_f32()?;
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                memory.set_f32(addr, value)?;
+                if memarg.memory == 0 {
+                    let data = unsafe { &mut *memory0_data_ptr };
+                    mem_write_u32(data, addr, value.to_bits())?;
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data_mut();
+                    mem_write_u32(data, addr, value.to_bits())?;
+                }
             }
             Op::StoreF64(addr) => {
                 let value = frame.stack.pop_f64()?;
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                memory.set_f64(addr, value)?;
+                if memarg.memory == 0 {
+                    let data = unsafe { &mut *memory0_data_ptr };
+                    mem_write_u64(data, addr, value.to_bits())?;
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data_mut();
+                    mem_write_u64(data, addr, value.to_bits())?;
+                }
             }
 
             // Silently narrow the width of the value
@@ -1444,46 +1589,76 @@ fn execute<const TRACK_TICKS: bool>(
                 let value = frame.stack.pop_i32()? as u8;
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                memory.set_u8(addr, value)?;
+                if memarg.memory == 0 {
+                    let data = unsafe { &mut *memory0_data_ptr };
+                    mem_write_u8(data, addr, value)?;
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data_mut();
+                    mem_write_u8(data, addr, value)?;
+                }
             }
             Op::Store16_32(addr) => {
                 let value = frame.stack.pop_i32()? as u16;
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                memory.set_u16(addr, value)?;
+                if memarg.memory == 0 {
+                    let data = unsafe { &mut *memory0_data_ptr };
+                    mem_write_u16(data, addr, value)?;
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data_mut();
+                    mem_write_u16(data, addr, value)?;
+                }
             }
             Op::Store8_64(addr) => {
                 let value = frame.stack.pop_i64()? as u8;
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                memory.set_u8(addr, value)?;
+                if memarg.memory == 0 {
+                    let data = unsafe { &mut *memory0_data_ptr };
+                    mem_write_u8(data, addr, value)?;
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data_mut();
+                    mem_write_u8(data, addr, value)?;
+                }
             }
             Op::Store16_64(addr) => {
                 let value = frame.stack.pop_i64()? as u16;
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                memory.set_u16(addr, value)?;
+                if memarg.memory == 0 {
+                    let data = unsafe { &mut *memory0_data_ptr };
+                    mem_write_u16(data, addr, value)?;
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data_mut();
+                    mem_write_u16(data, addr, value)?;
+                }
             }
             Op::Store32_64(addr) => {
                 let value = frame.stack.pop_i64()? as u32;
                 let memarg = addr;
                 let addr = adjust_memarg(&mut frame.stack, &memarg)?;
-                let memory = memories
-                    .get_mut(memarg.memory as usize)
-                    .ok_or(Fault::MemoryOutOfBounds)?;
-                memory.set_u32(addr, value)?;
+                if memarg.memory == 0 {
+                    let data = unsafe { &mut *memory0_data_ptr };
+                    mem_write_u32(data, addr, value)?;
+                } else {
+                    let memory = memories
+                        .get_mut(memarg.memory as usize)
+                        .ok_or(Fault::MemoryOutOfBounds)?;
+                    let data = memory.data_mut();
+                    mem_write_u32(data, addr, value)?;
+                }
             }
 
             Op::I32Const(v) => {
@@ -1507,27 +1682,18 @@ fn execute<const TRACK_TICKS: bool>(
                 frame.stack.push_u32(size_in_pages as u32);
             }
             Op::MemoryGrow(mem_idx) => {
-                let delta = frame.stack.pop_i32()?;
+                let delta = frame.stack.pop_u32()? as usize;
                 let memory = memories
                     .get_mut(*mem_idx as usize)
                     .ok_or(Fault::MemoryOutOfBounds)?;
-                if delta < 0 {
-                    frame.stack.push_i32(-1);
-                } else {
-                    let current_size = memory.size();
-                    let old_page_count = current_size / WASM_PAGE_SIZE;
-                    let Some(growth_size) = (delta as usize).checked_mul(WASM_PAGE_SIZE) else {
-                        frame.stack.push_i32(-1);
-                        continue;
-                    };
-                    let Some(new_size) = current_size.checked_add(growth_size) else {
-                        frame.stack.push_i32(-1);
-                        continue;
-                    };
-                    match memory.grow(new_size) {
-                        Ok(_) => frame.stack.push_i32(old_page_count as i32),
-                        Err(_) => frame.stack.push_i32(-1),
+                match memory.grow(delta * WASM_PAGE_SIZE) {
+                    Ok(old_size) => {
+                        frame.stack.push_i32((old_size / WASM_PAGE_SIZE) as i32);
+                        if *mem_idx == 0 {
+                            memory0_data_ptr = memories[0].data_mut();
+                        }
                     }
+                    Err(_) => frame.stack.push_i32(-1),
                 }
             }
             Op::MemoryInit(data_idx, mem_idx) => {
@@ -2421,8 +2587,100 @@ fn execute<const TRACK_TICKS: bool>(
     }
 }
 
+#[inline(always)]
+fn mem_read_u8(data: &[u8], addr: usize) -> Result<u8, Fault> {
+    if addr >= data.len() {
+        return Err(Fault::MemoryOutOfBounds);
+    }
+    unsafe { Ok(*data.as_ptr().add(addr)) }
+}
+
+#[inline(always)]
+fn mem_read_u16(data: &[u8], addr: usize) -> Result<u16, Fault> {
+    let end = addr.wrapping_add(2);
+    if addr > end || end > data.len() {
+        return Err(Fault::MemoryOutOfBounds);
+    }
+    unsafe {
+        let bytes = *(data.as_ptr().add(addr) as *const [u8; 2]);
+        Ok(u16::from_le_bytes(bytes))
+    }
+}
+
+#[inline(always)]
+fn mem_read_u32(data: &[u8], addr: usize) -> Result<u32, Fault> {
+    let end = addr.wrapping_add(4);
+    if addr > end || end > data.len() {
+        return Err(Fault::MemoryOutOfBounds);
+    }
+    unsafe {
+        let bytes = *(data.as_ptr().add(addr) as *const [u8; 4]);
+        Ok(u32::from_le_bytes(bytes))
+    }
+}
+
+#[inline(always)]
+fn mem_read_u64(data: &[u8], addr: usize) -> Result<u64, Fault> {
+    let end = addr.wrapping_add(8);
+    if addr > end || end > data.len() {
+        return Err(Fault::MemoryOutOfBounds);
+    }
+    unsafe {
+        let bytes = *(data.as_ptr().add(addr) as *const [u8; 8]);
+        Ok(u64::from_le_bytes(bytes))
+    }
+}
+
+#[inline(always)]
+fn mem_write_u8(data: &mut [u8], addr: usize, value: u8) -> Result<(), Fault> {
+    if addr >= data.len() {
+        return Err(Fault::MemoryOutOfBounds);
+    }
+    unsafe {
+        *data.as_mut_ptr().add(addr) = value;
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn mem_write_u16(data: &mut [u8], addr: usize, value: u16) -> Result<(), Fault> {
+    let end = addr.wrapping_add(2);
+    if addr > end || end > data.len() {
+        return Err(Fault::MemoryOutOfBounds);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), data.as_mut_ptr().add(addr), 2);
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn mem_write_u32(data: &mut [u8], addr: usize, value: u32) -> Result<(), Fault> {
+    let end = addr.wrapping_add(4);
+    if addr > end || end > data.len() {
+        return Err(Fault::MemoryOutOfBounds);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), data.as_mut_ptr().add(addr), 4);
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn mem_write_u64(data: &mut [u8], addr: usize, value: u64) -> Result<(), Fault> {
+    let end = addr.wrapping_add(8);
+    if addr > end || end > data.len() {
+        return Err(Fault::MemoryOutOfBounds);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), data.as_mut_ptr().add(addr), 8);
+    }
+    Ok(())
+}
+
+#[inline(always)]
 fn adjust_memarg(stack: &mut Stack, memarg: &MemArg) -> Result<usize, Fault> {
-    let base_addr = stack.pop_i32()? as usize;
+    let base_addr = stack.pop_u32()? as usize;
 
     // Note: Alignment is only a "hint", we could issue a warning here, but that would just slow
     //  down the interpreter.
