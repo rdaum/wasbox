@@ -283,41 +283,37 @@ fn trunc_f64_to_u64(value: f64) -> Result<u64, Fault> {
     Ok(value.trunc() as u64)
 }
 
-/// Unified branch execution using structured control flow
 fn execute_branch(frame: &mut Frame, types: &[FuncType], depth: usize) -> Result<(), Fault> {
-    if depth >= frame.control_stack.len() {
-        return Err(Fault::ControlStackUnderflow);
-    }
-
     // All control scopes are valid branch targets. Depth is counted from innermost scope.
     let target_idx = frame
         .control_stack
         .len()
         .checked_sub(1 + depth)
         .ok_or(Fault::ControlStackUnderflow)?;
-    let target_scope_type = frame.control_stack[target_idx].scope_type;
+
+    let control = &frame.control_stack[target_idx];
+    let target_scope_type = control.scope_type;
+    let target_stack_width = control.stack_width;
+    let target_start_pc = control.start_pc;
+    let target_end_pc = control.end_pc;
+    let target_signature = control.signature;
+
     let pop_depth = match target_scope_type {
         ScopeType::Loop => frame.control_stack.len() - 1 - target_idx, // Don't pop the loop
         _ => frame.control_stack.len() - target_idx, // Pop the target block/function too
     };
 
-    // Capture target metadata before mutating control stack.
-    let target_stack_width = frame.control_stack[target_idx].stack_width;
-    let target_start_pc = frame.control_stack[target_idx].start_pc;
-    let target_end_pc = frame.control_stack[target_idx].end_pc;
-    let target_signature = frame.control_stack[target_idx].signature;
-
     // Pop the branch values from the stack (these will be provided to the target label).
     // For loop labels, branch arity is the loop parameter arity. For all other labels,
     // branch arity is the block result arity.
     frame.scratch_values_raw.clear();
-    match (&target_signature, target_scope_type) {
+    match (target_signature, target_scope_type) {
         (TypeSignature::ValueType(_), ScopeType::Loop) => {
             // Value-typed loop blocks have no explicit params in MVP encoding.
         }
         (TypeSignature::Index(idx), ScopeType::Loop) => {
-            debug_assert!((*idx as usize) < types.len());
-            let ft = unsafe { types.get_unchecked(*idx as usize) };
+            debug_assert!((idx as usize) < types.len());
+            let ft = unsafe { types.get_unchecked(idx as usize) };
             frame.scratch_values_raw.resize(ft.params.len(), 0);
             for (i, vt) in ft.params.iter().enumerate().rev() {
                 debug_assert_ne!(*vt, ValueType::V128);
@@ -325,14 +321,14 @@ fn execute_branch(frame: &mut Frame, types: &[FuncType], depth: usize) -> Result
             }
         }
         (TypeSignature::ValueType(vt), _) => {
-            if *vt != ValueType::Unit && frame.stack.width() > 0 {
-                debug_assert_ne!(*vt, ValueType::V128);
+            if vt != ValueType::Unit && frame.stack.width() > 0 {
+                debug_assert_ne!(vt, ValueType::V128);
                 frame.scratch_values_raw.push(frame.stack.pop_u64()?);
             }
         }
         (TypeSignature::Index(idx), _) => {
-            debug_assert!((*idx as usize) < types.len());
-            let ft = unsafe { types.get_unchecked(*idx as usize) };
+            debug_assert!((idx as usize) < types.len());
+            let ft = unsafe { types.get_unchecked(idx as usize) };
             frame.scratch_values_raw.resize(ft.results.len(), 0);
             for (i, vt) in ft.results.iter().enumerate().rev() {
                 debug_assert_ne!(*vt, ValueType::V128);
@@ -451,45 +447,73 @@ fn execute<const TRACK_TICKS: bool>(
         &mut []
     };
 
+    // Cache locals pointer to avoid bounds checking overhead
+    let locals_ptr = frame.locals.as_mut_ptr();
+
+    // Cache program ops slice to avoid repeated dereferences and length checks
+    let program = unsafe { &*frame.program_ptr() };
+    let ops = program.ops.as_slice();
+    let ops_len = ops.len();
+
+    let mut pc = frame.pc;
+
+    macro_rules! return_ok {
+        ($val:expr) => {{
+            frame.pc = pc;
+            return Ok($val);
+        }};
+    }
+
+    macro_rules! return_err {
+        ($val:expr) => {{
+            frame.pc = pc;
+            return Err($val);
+        }};
+    }
+
+    macro_rules! exec_branch {
+        ($depth:expr) => {{
+            frame.pc = pc;
+            execute_branch(frame, types, $depth as usize)?;
+            pc = frame.pc;
+        }};
+    }
+
     loop {
-        // SAFETY: `program_ptr` is valid for the frame lifetime (instance-owned or frame-owned).
-        let program = unsafe { &*frame.program_ptr() };
-        // Pull next opcode from the program
-        let pc = frame.pc;
-        if pc >= program.ops.len() {
-            // We've reached the end of the program
-            return Ok((Continuation::ProgramEnd, ticks_used));
+        if pc >= ops_len {
+            return_ok!((Continuation::ProgramEnd, ticks_used));
         }
         if TRACK_TICKS {
             ticks_used += 1;
             if ticks_used >= max_ticks {
-                return Err(Fault::OutOfTicks);
+                return_err!(Fault::OutOfTicks);
             }
         }
-        frame.pc += 1;
-        let op_ref = &program.ops[pc];
+        let op_ref = unsafe { ops.get_unchecked(pc) };
+        let prev_pc = pc;
+        pc += 1;
 
         // Hot-path dispatch without cloning.
         match op_ref {
             Op::Nop => continue,
-            Op::Unreachable => return Err(Fault::Unreachable),
+            Op::Unreachable => return_err!(Fault::Unreachable),
             Op::StartScope(sig, scope_type) => {
                 if let TypeSignature::Index(idx) = *sig {
                     if idx as usize >= types.len() {
                         return Err(Fault::UnresolvableTypeIndex(idx));
                     }
                 }
-                let end_pc = program.scope_end_jumps[pc];
+                let end_pc = program.scope_end_jumps[prev_pc];
                 if end_pc == usize::MAX {
-                    return Err(Fault::Unreachable);
+                    return_err!(Fault::Unreachable);
                 }
-                frame.push_control(*sig, *scope_type, pc, end_pc);
+                frame.push_control(*sig, *scope_type, prev_pc, end_pc);
                 continue;
             }
             Op::EndScope(c) => {
                 // If this is EndScope(Program), we need to preserve the stack for return value.
                 if matches!(c, ScopeType::Program) {
-                    return Ok((Continuation::DoneReturn, ticks_used));
+                    return_ok!((Continuation::DoneReturn, ticks_used));
                 }
                 let end_scope = frame.pop_control(types)?;
 
@@ -515,57 +539,49 @@ fn execute<const TRACK_TICKS: bool>(
             Op::If => {
                 let condition = frame.stack.pop_u32()?;
                 if condition == 0 {
-                    let jump_target = program.if_else_jumps[pc];
+                    let jump_target = program.if_else_jumps[prev_pc];
                     if jump_target == usize::MAX {
-                        return Err(Fault::Unreachable);
+                        return_err!(Fault::Unreachable);
                     }
-                    frame.pc = jump_target;
+                    pc = jump_target;
                 }
                 continue;
             }
             Op::Else => {
-                let jump_target = program.if_else_jumps[pc];
+                let jump_target = program.if_else_jumps[prev_pc];
                 if jump_target == usize::MAX {
-                    return Err(Fault::Unreachable);
+                    return_err!(Fault::Unreachable);
                 }
-                frame.pc = jump_target;
+                pc = jump_target;
                 continue;
             }
             Op::Br(depth) => {
-                execute_branch(frame, types, *depth as usize)?;
+                exec_branch!(*depth);
                 continue;
             }
             Op::BrIf(depth) => {
                 let condition = frame.stack.pop_u32()?;
                 if condition != 0 {
-                    execute_branch(frame, types, *depth as usize)?;
+                    exec_branch!(*depth);
                     continue;
                 }
                 continue;
             }
             Op::BrIfLocalI64Eqz(local_idx, depth) => {
-                if *local_idx as usize >= frame.locals.len() {
-                    return Err(Fault::LocalIndexOutOfBounds);
-                }
                 debug_assert_eq!(program.local_types[*local_idx as usize], ValueType::I64);
-                let v = frame.locals[*local_idx as usize];
+                let v = unsafe { *locals_ptr.add(*local_idx as usize) };
                 if v == 0 {
-                    execute_branch(frame, types, *depth as usize)?;
+                    exec_branch!(*depth);
                 }
                 continue;
             }
             Op::BrIfLocalI32GeU(lhs_local, rhs_local, depth) => {
-                if *lhs_local as usize >= frame.locals.len()
-                    || *rhs_local as usize >= frame.locals.len()
-                {
-                    return Err(Fault::LocalIndexOutOfBounds);
-                }
                 debug_assert_eq!(program.local_types[*lhs_local as usize], ValueType::I32);
                 debug_assert_eq!(program.local_types[*rhs_local as usize], ValueType::I32);
                 let lhs = frame.locals[*lhs_local as usize] as u32;
                 let rhs = frame.locals[*rhs_local as usize] as u32;
                 if lhs >= rhs {
-                    execute_branch(frame, types, *depth as usize)?;
+                    exec_branch!(*depth);
                 }
                 continue;
             }
@@ -577,17 +593,17 @@ fn execute<const TRACK_TICKS: bool>(
                 } else {
                     *default
                 } as usize;
-                execute_branch(frame, types, depth)?;
+                exec_branch!(depth);
                 continue;
             }
-            Op::Return => return Ok((Continuation::DoneReturn, ticks_used)),
-            Op::Call(c) => return Ok((Continuation::Call(*c), ticks_used)),
+            Op::Return => return_ok!((Continuation::DoneReturn, ticks_used)),
+            Op::Call(c) => return_ok!((Continuation::Call(*c), ticks_used)),
             Op::CallIndirect(_type_idx, table_idx) => {
                 let expected_type_idx = *_type_idx;
                 let table_idx = *table_idx;
                 // Pop the table index from the stack (the actual index to use)
                 let table_index = frame.stack.pop_u32()?;
-                let call_site_pc = pc;
+                let call_site_pc = prev_pc;
 
                 // Look up the function reference in the specified table
                 if table_idx as usize >= tables.len() {
@@ -613,9 +629,9 @@ fn execute<const TRACK_TICKS: bool>(
                     if cached_target_module_id == current_module_id
                         || cached_target_module_id == current_module_owner_id
                     {
-                        return Ok((Continuation::Call(cached_target_func_idx), ticks_used));
+                        return_ok!((Continuation::Call(cached_target_func_idx), ticks_used));
                     }
-                    return Ok((
+                    return_ok!((
                         Continuation::CallExternal {
                             module_id: cached_target_module_id,
                             func_id: cached_target_func_idx,
@@ -672,7 +688,7 @@ fn execute<const TRACK_TICKS: bool>(
                                 func_ref.module_id,
                                 func_ref.func_idx,
                             );
-                            Ok((
+                            return_ok!((
                                 Continuation::CallExternal {
                                     module_id: target_module_id,
                                     func_id: func_ref.func_idx,
@@ -687,36 +703,28 @@ fn execute<const TRACK_TICKS: bool>(
                 };
             }
             Op::GetLocal(idx) => {
-                if *idx as usize >= frame.locals.len() {
-                    return Err(Fault::LocalIndexOutOfBounds);
-                }
-                let val = frame.locals[*idx as usize];
+                let val = unsafe { *locals_ptr.add(*idx as usize) };
                 let ty = program.local_types[*idx as usize];
                 Value::push_raw_to(ty, val, &mut frame.stack);
                 continue;
             }
             Op::SetLocal(idx) => {
-                if *idx as usize >= frame.locals.len() {
-                    return Err(Fault::LocalIndexOutOfBounds);
-                }
                 let ty = program.local_types[*idx as usize];
                 let val = Value::pop_raw_from(ty, &mut frame.stack)?;
-                frame.locals[*idx as usize] = val;
+                unsafe {
+                    *locals_ptr.add(*idx as usize) = val;
+                }
                 continue;
             }
             Op::TeeLocal(idx) => {
-                if *idx as usize >= frame.locals.len() {
-                    return Err(Fault::LocalIndexOutOfBounds);
-                }
                 let ty = program.local_types[*idx as usize];
                 let val = Value::top_raw_of(ty, &mut frame.stack)?;
-                frame.locals[*idx as usize] = val;
+                unsafe {
+                    *locals_ptr.add(*idx as usize) = val;
+                }
                 continue;
             }
             Op::I32LocalMulAddConst(src, mul, add) => {
-                if *src as usize >= frame.locals.len() {
-                    return Err(Fault::LocalIndexOutOfBounds);
-                }
                 debug_assert_eq!(program.local_types[*src as usize], ValueType::I32);
                 let v = frame.locals[*src as usize] as i32;
                 frame
@@ -725,48 +733,42 @@ fn execute<const TRACK_TICKS: bool>(
                 continue;
             }
             Op::I32LocalMulAddConstSet(src, mul, add, dst) => {
-                if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
-                    return Err(Fault::LocalIndexOutOfBounds);
-                }
                 debug_assert_eq!(program.local_types[*src as usize], ValueType::I32);
                 debug_assert_eq!(program.local_types[*dst as usize], ValueType::I32);
                 let v = frame.locals[*src as usize] as i32;
-                frame.locals[*dst as usize] = v.wrapping_mul(*mul).wrapping_add(*add) as i64 as u64;
+                unsafe {
+                    *locals_ptr.add(*dst as usize) =
+                        v.wrapping_mul(*mul).wrapping_add(*add) as i64 as u64;
+                }
                 continue;
             }
             Op::I32LocalAddConstSet(src, add, dst) => {
-                if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
-                    return Err(Fault::LocalIndexOutOfBounds);
-                }
                 debug_assert_eq!(program.local_types[*src as usize], ValueType::I32);
                 debug_assert_eq!(program.local_types[*dst as usize], ValueType::I32);
                 let v = frame.locals[*src as usize] as i32;
-                frame.locals[*dst as usize] = v.wrapping_add(*add) as i64 as u64;
+                unsafe {
+                    *locals_ptr.add(*dst as usize) = v.wrapping_add(*add) as i64 as u64;
+                }
                 continue;
             }
             Op::I64LocalAddSet(a, b, dst) => {
-                if *a as usize >= frame.locals.len()
-                    || *b as usize >= frame.locals.len()
-                    || *dst as usize >= frame.locals.len()
-                {
-                    return Err(Fault::LocalIndexOutOfBounds);
-                }
                 debug_assert_eq!(program.local_types[*a as usize], ValueType::I64);
                 debug_assert_eq!(program.local_types[*b as usize], ValueType::I64);
                 debug_assert_eq!(program.local_types[*dst as usize], ValueType::I64);
-                let av = frame.locals[*a as usize];
-                let bv = frame.locals[*b as usize];
-                frame.locals[*dst as usize] = av.wrapping_add(bv);
+                let av = unsafe { *locals_ptr.add(*a as usize) };
+                let bv = unsafe { *locals_ptr.add(*b as usize) };
+                unsafe {
+                    *locals_ptr.add(*dst as usize) = av.wrapping_add(bv);
+                }
                 continue;
             }
             Op::I64LocalSubConstSet(src, c, dst) => {
-                if *src as usize >= frame.locals.len() || *dst as usize >= frame.locals.len() {
-                    return Err(Fault::LocalIndexOutOfBounds);
-                }
                 debug_assert_eq!(program.local_types[*src as usize], ValueType::I64);
                 debug_assert_eq!(program.local_types[*dst as usize], ValueType::I64);
-                let v = frame.locals[*src as usize];
-                frame.locals[*dst as usize] = v.wrapping_sub(*c as u64);
+                let v = unsafe { *locals_ptr.add(*src as usize) };
+                unsafe {
+                    *locals_ptr.add(*dst as usize) = v.wrapping_sub(*c as u64);
+                }
                 continue;
             }
             Op::GetGlobal(g) => {

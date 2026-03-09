@@ -17,3 +17,6 @@ wat = "1.238"
 [[bench]]
 name = "runtime"
 harness = false
+
+[profile.release]
+debug = true
