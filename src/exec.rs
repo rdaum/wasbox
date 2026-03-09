@@ -641,11 +641,11 @@ fn execute<const TRACK_TICKS: bool>(
                     ));
                 }
 
-                return match &table_elements[table_index as usize] {
-                    None => Err(Fault::UninitializedElement),
+                match &table_elements[table_index as usize] {
+                    None => return_err!(Fault::UninitializedElement),
                     Some(Value::FuncRef(Some(func_ref))) => {
                         if expected_type_idx as usize >= types.len() {
-                            return Err(Fault::UnresolvableTypeIndex(expected_type_idx));
+                            return_err!(Fault::UnresolvableTypeIndex(expected_type_idx));
                         }
                         let expected_type = &types[expected_type_idx as usize];
 
@@ -654,18 +654,18 @@ fn execute<const TRACK_TICKS: bool>(
                             || target_module_id == current_module_owner_id
                         {
                             if (func_ref.func_idx as usize) >= functions.len() {
-                                return Err(Fault::UnresolvableTypeIndex(func_ref.func_idx));
+                                return_err!(Fault::UnresolvableTypeIndex(func_ref.func_idx));
                             }
                             let actual_type_idx = functions[func_ref.func_idx as usize];
                             if actual_type_idx >= types.len() {
-                                return Err(Fault::UnresolvableTypeIndex(actual_type_idx as u32));
+                                return_err!(Fault::UnresolvableTypeIndex(actual_type_idx as u32));
                             }
                             if actual_type_idx != expected_type_idx as usize {
                                 let actual_type = &types[actual_type_idx];
                                 if expected_type.params != actual_type.params
                                     || expected_type.results != actual_type.results
                                 {
-                                    return Err(Fault::IndirectCallTypeMismatch);
+                                    return_err!(Fault::IndirectCallTypeMismatch);
                                 }
                             }
                             frame.update_call_indirect_cache(
@@ -677,7 +677,7 @@ fn execute<const TRACK_TICKS: bool>(
                                 func_ref.module_id,
                                 func_ref.func_idx,
                             );
-                            Ok((Continuation::Call(func_ref.func_idx), ticks_used))
+                            return_ok!((Continuation::Call(func_ref.func_idx), ticks_used));
                         } else {
                             frame.update_call_indirect_cache(
                                 call_site_pc,
@@ -695,11 +695,11 @@ fn execute<const TRACK_TICKS: bool>(
                                     expected_type: Some((current_module_id, expected_type_idx)),
                                 },
                                 ticks_used,
-                            ))
+                            ));
                         }
                     }
-                    Some(Value::FuncRef(None)) => Err(Fault::UninitializedElement),
-                    _ => Err(Fault::UndefinedElement),
+                    Some(Value::FuncRef(None)) => return_err!(Fault::UninitializedElement),
+                    _ => return_err!(Fault::UndefinedElement),
                 };
             }
             Op::GetLocal(idx) => {
@@ -1684,18 +1684,31 @@ fn execute<const TRACK_TICKS: bool>(
                 frame.stack.push_u32(size_in_pages as u32);
             }
             Op::MemoryGrow(mem_idx) => {
-                let delta = frame.stack.pop_u32()? as usize;
+                let delta = frame.stack.pop_i32()?;
                 let memory = memories
                     .get_mut(*mem_idx as usize)
                     .ok_or(Fault::MemoryOutOfBounds)?;
-                match memory.grow(delta * WASM_PAGE_SIZE) {
-                    Ok(old_size) => {
-                        frame.stack.push_i32((old_size / WASM_PAGE_SIZE) as i32);
+                if delta < 0 {
+                    frame.stack.push_i32(-1);
+                } else {
+                    let current_size = memory.size();
+                    let old_page_count = current_size / WASM_PAGE_SIZE;
+                    let Some(growth_size) = (delta as usize).checked_mul(WASM_PAGE_SIZE) else {
+                        frame.stack.push_i32(-1);
+                        continue;
+                    };
+                    let Some(new_size) = current_size.checked_add(growth_size) else {
+                        frame.stack.push_i32(-1);
+                        continue;
+                    };
+                    if memory.grow(new_size).is_ok() {
+                        frame.stack.push_i32(old_page_count as i32);
                         if *mem_idx == 0 {
                             memory0_data_ptr = memories[0].data_mut();
                         }
+                    } else {
+                        frame.stack.push_i32(-1);
                     }
-                    Err(_) => frame.stack.push_i32(-1),
                 }
             }
             Op::MemoryInit(data_idx, mem_idx) => {
