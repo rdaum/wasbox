@@ -6,7 +6,11 @@ fn bench_wasbox_invoke(c: &mut Criterion) {
     for case in benchmark_cases() {
         group.bench_function(case.name, |b| {
             b.iter_batched(
-                || WasboxHarness::new(case).expect("failed to create harness").0,
+                || {
+                    WasboxHarness::new(case)
+                        .expect("failed to create harness")
+                        .0
+                },
                 |mut harness| harness.invoke_once().expect("invoke failed"),
                 BatchSize::SmallInput,
             );

@@ -24,8 +24,8 @@
 //!     No SIMD, no Threads, no exceptions proposal, no tail call proposal
 //!          MAYBE GC proposal, but not sure yet
 
-mod decode;
 pub mod bench_suite;
+mod decode;
 mod exec;
 mod frame;
 mod import;

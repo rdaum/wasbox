@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use wasbox::bench_suite::{bench_wasbox, bench_wasmtime, benchmark_cases, BenchCase};
+use wasbox::bench_suite::{
+    bench_wasbox, bench_wasbox_budgeted, bench_wasmtime, benchmark_cases, BenchCase,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Engine {
@@ -28,6 +30,7 @@ struct Cli {
     engine: Engine,
     warmup: usize,
     iters: usize,
+    tick_slice: Option<usize>,
     cases: Vec<String>,
     list: bool,
     csv: Option<PathBuf>,
@@ -37,6 +40,7 @@ fn parse_args() -> Result<Cli, String> {
     let mut engine = Engine::Both;
     let mut warmup = 250;
     let mut iters = 2_000;
+    let mut tick_slice = None;
     let mut cases = Vec::new();
     let mut list = false;
     let mut csv = None;
@@ -66,6 +70,18 @@ fn parse_args() -> Result<Cli, String> {
                     .parse::<usize>()
                     .map_err(|e| format!("invalid --iters '{value}': {e}"))?;
             }
+            "--tick-slice" => {
+                let value = it
+                    .next()
+                    .ok_or_else(|| "--tick-slice requires a value".to_string())?;
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|e| format!("invalid --tick-slice '{value}': {e}"))?;
+                if parsed == 0 {
+                    return Err("--tick-slice must be > 0".to_string());
+                }
+                tick_slice = Some(parsed);
+            }
             "--case" => {
                 let value = it
                     .next()
@@ -87,6 +103,7 @@ fn parse_args() -> Result<Cli, String> {
                       --engine wasbox|wasmtime|both   Engine to run (default: both)\n\
                       --warmup N                       Warmup iterations (default: 250)\n\
                       --iters N                        Timed iterations (default: 2000)\n\
+                      --tick-slice N                   Run wasbox via run_for_ticks(N)\n\
                       --case NAME                      Run a specific case (repeatable)\n\
                       --list                           List available benchmark cases\n\
                       --csv PATH                       Write CSV output\n"
@@ -101,13 +118,17 @@ fn parse_args() -> Result<Cli, String> {
         engine,
         warmup,
         iters,
+        tick_slice,
         cases,
         list,
         csv,
     })
 }
 
-fn selected_cases<'a>(cases: &'a [BenchCase], selected: &[String]) -> Result<Vec<&'a BenchCase>, String> {
+fn selected_cases<'a>(
+    cases: &'a [BenchCase],
+    selected: &[String],
+) -> Result<Vec<&'a BenchCase>, String> {
     if selected.is_empty() {
         return Ok(cases.iter().collect());
     }
@@ -142,7 +163,9 @@ fn main() -> Result<(), String> {
         return Err("no benchmark cases selected".to_string());
     }
 
-    let mut csv_rows = vec!["case,engine,warmup,iters,instantiate_ms,exec_total_ms,exec_mean_ns,last_value".to_string()];
+    let mut csv_rows = vec![
+        "case,engine,warmup,iters,instantiate_ms,exec_total_ms,exec_mean_ns,last_value".to_string(),
+    ];
     println!(
         "{:<20} {:<9} {:>10} {:>14} {:>14} {:>12}",
         "case", "engine", "init_ms", "exec_total_ms", "exec_mean_ns", "last"
@@ -153,11 +176,21 @@ fn main() -> Result<(), String> {
         let run_wasmtime = matches!(cli.engine, Engine::Wasmtime | Engine::Both);
 
         if run_wasbox {
-            let r = bench_wasbox(case, cli.warmup, cli.iters)?;
+            let (r, engine_label) = if let Some(tick_slice) = cli.tick_slice {
+                (
+                    bench_wasbox_budgeted(case, cli.warmup, cli.iters, tick_slice)?,
+                    format!("wasbox@{tick_slice}"),
+                )
+            } else {
+                (
+                    bench_wasbox(case, cli.warmup, cli.iters)?,
+                    "wasbox".to_string(),
+                )
+            };
             println!(
                 "{:<20} {:<9} {:>10.3} {:>14.3} {:>14.1} {:>12}",
                 case.name,
-                "wasbox",
+                engine_label,
                 r.instantiate.as_secs_f64() * 1_000.0,
                 r.execute_total.as_secs_f64() * 1_000.0,
                 r.mean_execute_ns(),
@@ -166,7 +199,7 @@ fn main() -> Result<(), String> {
             csv_rows.push(format!(
                 "{},{},{},{},{:.6},{:.6},{:.1},{}",
                 case.name,
-                "wasbox",
+                engine_label,
                 cli.warmup,
                 cli.iters,
                 r.instantiate.as_secs_f64() * 1_000.0,

@@ -212,6 +212,32 @@ fn count_function_imports(module: &Module) -> u32 {
     count
 }
 
+#[inline(always)]
+fn fill_locals_from_stack(
+    locals: &mut [u64],
+    param_count: usize,
+    local_defaults: &[u64],
+    stack: &mut Stack,
+) -> Result<(), Fault> {
+    match param_count {
+        0 => {}
+        1 => {
+            locals[0] = stack.pop_u64()?;
+        }
+        2 => {
+            locals[1] = stack.pop_u64()?;
+            locals[0] = stack.pop_u64()?;
+        }
+        _ => {
+            stack.pop_u64s_into_slice(&mut locals[..param_count])?;
+        }
+    }
+    if !local_defaults.is_empty() {
+        locals[param_count..].copy_from_slice(local_defaults);
+    }
+    Ok(())
+}
+
 pub struct Instance {
     pub owner_id: u32,
     pub module: Module,
@@ -978,24 +1004,7 @@ impl Instance {
         let param_count = param_types.len();
         let local_defaults = &self.program_local_defaults[index];
         let mut locals = vec![0u64; param_count + local_defaults.len()];
-        match param_count {
-            0 => {}
-            1 => {
-                locals[0] = stack.pop_u64()?;
-            }
-            2 => {
-                locals[1] = stack.pop_u64()?;
-                locals[0] = stack.pop_u64()?;
-            }
-            _ => {
-                for i in (0..param_count).rev() {
-                    locals[i] = stack.pop_u64()?;
-                }
-            }
-        }
-        if !local_defaults.is_empty() {
-            locals[param_count..].copy_from_slice(local_defaults);
-        }
+        fill_locals_from_stack(&mut locals, param_count, local_defaults, stack)?;
 
         let mut frame = Frame::for_borrowed_program(
             locals,
@@ -1020,24 +1029,7 @@ impl Instance {
         let param_count = param_types.len();
         let local_defaults = self.program_local_defaults.get_unchecked(local_idx);
         let mut locals = vec![0u64; param_count + local_defaults.len()];
-        match param_count {
-            0 => {}
-            1 => {
-                locals[0] = stack.pop_u64()?;
-            }
-            2 => {
-                locals[1] = stack.pop_u64()?;
-                locals[0] = stack.pop_u64()?;
-            }
-            _ => {
-                for i in (0..param_count).rev() {
-                    locals[i] = stack.pop_u64()?;
-                }
-            }
-        }
-        if !local_defaults.is_empty() {
-            locals[param_count..].copy_from_slice(local_defaults);
-        }
+        fill_locals_from_stack(&mut locals, param_count, local_defaults, stack)?;
 
         let mut frame = Frame::for_borrowed_program(
             locals,
@@ -1077,24 +1069,7 @@ impl Instance {
         if frame.locals.len() != total_locals {
             frame.locals.resize(total_locals, 0);
         }
-        match param_count {
-            0 => {}
-            1 => {
-                frame.locals[0] = stack.pop_u64()?;
-            }
-            2 => {
-                frame.locals[1] = stack.pop_u64()?;
-                frame.locals[0] = stack.pop_u64()?;
-            }
-            _ => {
-                for i in (0..param_count).rev() {
-                    frame.locals[i] = stack.pop_u64()?;
-                }
-            }
-        }
-        if !local_defaults.is_empty() {
-            frame.locals[param_count..].copy_from_slice(local_defaults);
-        }
+        fill_locals_from_stack(&mut frame.locals, param_count, local_defaults, stack)?;
 
         let program_key = ProgramKey::local(self.owner_id, index as u32);
         if frame.program_key != program_key {
@@ -1122,24 +1097,7 @@ impl Instance {
         if frame.locals.len() != total_locals {
             frame.locals.resize(total_locals, 0);
         }
-        match param_count {
-            0 => {}
-            1 => {
-                frame.locals[0] = stack.pop_u64()?;
-            }
-            2 => {
-                frame.locals[1] = stack.pop_u64()?;
-                frame.locals[0] = stack.pop_u64()?;
-            }
-            _ => {
-                for i in (0..param_count).rev() {
-                    frame.locals[i] = stack.pop_u64()?;
-                }
-            }
-        }
-        if !local_defaults.is_empty() {
-            frame.locals[param_count..].copy_from_slice(local_defaults);
-        }
+        fill_locals_from_stack(&mut frame.locals, param_count, local_defaults, stack)?;
 
         let program_key = ProgramKey::local(self.owner_id, local_idx as u32);
         if frame.program_key != program_key {

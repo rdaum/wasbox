@@ -146,6 +146,22 @@ impl Stack {
     }
 
     #[inline(always)]
+    pub fn pop_u64s_into_slice(&mut self, dst: &mut [u64]) -> Result<(), Fault> {
+        let n = dst.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let len = self.data.len();
+        if len < n {
+            return Err(Fault::StackUnderflow);
+        }
+        let start = len - n;
+        dst.copy_from_slice(&self.data[start..]);
+        self.data.truncate(start);
+        Ok(())
+    }
+
+    #[inline(always)]
     pub fn pop_f32(&mut self) -> Result<f32, Fault> {
         self.data
             .pop()

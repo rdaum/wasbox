@@ -327,9 +327,7 @@ fn execute_branch(frame: &mut Frame, types: &[FuncType], depth: usize) -> Result
         (TypeSignature::ValueType(vt), _) => {
             if *vt != ValueType::Unit && frame.stack.width() > 0 {
                 debug_assert_ne!(*vt, ValueType::V128);
-                frame
-                    .scratch_values_raw
-                    .push(frame.stack.pop_u64()?);
+                frame.scratch_values_raw.push(frame.stack.pop_u64()?);
             }
         }
         (TypeSignature::Index(idx), _) => {
@@ -538,10 +536,7 @@ fn execute<const TRACK_TICKS: bool>(
                 if *local_idx as usize >= frame.locals.len() {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                debug_assert_eq!(
-                    program.local_types[*local_idx as usize],
-                    ValueType::I64
-                );
+                debug_assert_eq!(program.local_types[*local_idx as usize], ValueType::I64);
                 let v = frame.locals[*local_idx as usize];
                 if v == 0 {
                     execute_branch(frame, types, *depth as usize)?;
@@ -549,17 +544,13 @@ fn execute<const TRACK_TICKS: bool>(
                 continue;
             }
             Op::BrIfLocalI32GeU(lhs_local, rhs_local, depth) => {
-                if *lhs_local as usize >= frame.locals.len() || *rhs_local as usize >= frame.locals.len() {
+                if *lhs_local as usize >= frame.locals.len()
+                    || *rhs_local as usize >= frame.locals.len()
+                {
                     return Err(Fault::LocalIndexOutOfBounds);
                 }
-                debug_assert_eq!(
-                    program.local_types[*lhs_local as usize],
-                    ValueType::I32
-                );
-                debug_assert_eq!(
-                    program.local_types[*rhs_local as usize],
-                    ValueType::I32
-                );
+                debug_assert_eq!(program.local_types[*lhs_local as usize], ValueType::I32);
+                debug_assert_eq!(program.local_types[*rhs_local as usize], ValueType::I32);
                 let lhs = frame.locals[*lhs_local as usize] as u32;
                 let rhs = frame.locals[*rhs_local as usize] as u32;
                 if lhs >= rhs {
@@ -1554,7 +1545,8 @@ fn execute<const TRACK_TICKS: bool>(
 
                 let (src_start, src_end) = validate_range(src, len, data_bytes.len())?;
                 let (dst_start, dst_end) = validate_range(dst, len, memory.size())?;
-                memory.data_mut()[dst_start..dst_end].copy_from_slice(&data_bytes[src_start..src_end]);
+                memory.data_mut()[dst_start..dst_end]
+                    .copy_from_slice(&data_bytes[src_start..src_end]);
             }
             Op::DataDrop(data_idx) => {
                 let data_segment = data_segments
@@ -2568,8 +2560,16 @@ impl Value {
             ValueType::F32 => Value::F32(f32::from_bits(val as u32)),
             ValueType::F64 => Value::F64(f64::from_bits(val)),
             ValueType::V128 => unreachable!("V128 not supported in raw values"),
-            ValueType::FuncRef => Value::FuncRef(if val == u64::MAX { None } else { Some(decode_func_ref(val)) }),
-            ValueType::ExternRef => Value::ExternRef(if val == u64::MAX { None } else { Some(val as u32) }),
+            ValueType::FuncRef => Value::FuncRef(if val == u64::MAX {
+                None
+            } else {
+                Some(decode_func_ref(val))
+            }),
+            ValueType::ExternRef => Value::ExternRef(if val == u64::MAX {
+                None
+            } else {
+                Some(val as u32)
+            }),
             ValueType::Unit => Value::Unit,
         }
     }
@@ -2965,9 +2965,12 @@ impl ExecutionState {
                 .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
             let num_imported_funcs = instance.num_imported_functions;
             if funcidx < num_imported_funcs {
-                let type_idx = *instance.function_type_mapping().get(funcidx as usize).ok_or(
-                    ExecError::ExecutionFault(Fault::UnresolvableTypeIndex(funcidx)),
-                )?;
+                let type_idx = *instance
+                    .function_type_mapping()
+                    .get(funcidx as usize)
+                    .ok_or(ExecError::ExecutionFault(Fault::UnresolvableTypeIndex(
+                        funcidx,
+                    )))?;
                 let func_type = &instance.module.types[type_idx];
 
                 for (i, (expected, actual)) in func_type.params.iter().zip(args.iter()).enumerate()
@@ -3090,337 +3093,349 @@ impl ExecutionState {
 
                 // Handle continuations in a loop to support recursive calls
                 loop {
-                match continuation {
-                    Continuation::ProgramEnd | Continuation::DoneReturn => {
-                        // Handle function return
-                        let (_, mut completed_frame) = self.frame_stack.pop().unwrap();
-                        let return_types = completed_frame.program().return_types.clone();
-                        completed_frame.scratch_values_raw.clear();
+                    match continuation {
+                        Continuation::ProgramEnd | Continuation::DoneReturn => {
+                            // Handle function return
+                            let (_, mut completed_frame) = self.frame_stack.pop().unwrap();
+                            let return_types = completed_frame.program().return_types.clone();
+                            completed_frame.scratch_values_raw.clear();
 
-                        if let Some((_, caller_frame)) = self.frame_stack.last_mut() {
-                            match return_types.as_slice() {
-                                [] => {}
-                                [ValueType::Unit] => {}
-                                [rt] => {
-                                    debug_assert_ne!(*rt, ValueType::V128);
-                                    let val = completed_frame
-                                        .stack
-                                        .pop_u64()
-                                        .map_err(ExecError::ExecutionFault)?;
-                                    caller_frame.stack.push_u64(val);
-                                }
-                                _ => {
-                                    completed_frame
-                                        .scratch_values_raw
-                                        .resize(return_types.len(), 0);
-                                    for (i, rt) in return_types.iter().enumerate().rev() {
+                            if let Some((_, caller_frame)) = self.frame_stack.last_mut() {
+                                match return_types.as_slice() {
+                                    [] => {}
+                                    [ValueType::Unit] => {}
+                                    [rt] => {
                                         debug_assert_ne!(*rt, ValueType::V128);
-                                        completed_frame.scratch_values_raw[i] = completed_frame
+                                        let val = completed_frame
                                             .stack
                                             .pop_u64()
                                             .map_err(ExecError::ExecutionFault)?;
+                                        caller_frame.stack.push_u64(val);
                                     }
-                                    for (i, rt) in return_types.iter().enumerate() {
-                                        debug_assert_ne!(*rt, ValueType::V128);
-                                        caller_frame.stack.push_u64(completed_frame.scratch_values_raw[i]);
+                                    _ => {
+                                        completed_frame
+                                            .scratch_values_raw
+                                            .resize(return_types.len(), 0);
+                                        for (i, rt) in return_types.iter().enumerate().rev() {
+                                            debug_assert_ne!(*rt, ValueType::V128);
+                                            completed_frame.scratch_values_raw[i] = completed_frame
+                                                .stack
+                                                .pop_u64()
+                                                .map_err(ExecError::ExecutionFault)?;
+                                        }
+                                        for (i, rt) in return_types.iter().enumerate() {
+                                            debug_assert_ne!(*rt, ValueType::V128);
+                                            caller_frame
+                                                .stack
+                                                .push_u64(completed_frame.scratch_values_raw[i]);
+                                        }
                                     }
                                 }
-                            }
-                        } else {
-                            // No caller, this is the final result
-                            let final_values = self.result.get_or_insert_with(Vec::new);
-                            final_values.clear();
-                            match return_types.as_slice() {
-                                [] => {}
-                                [ValueType::Unit] => {}
-                                [rt] => {
-                                    debug_assert_ne!(*rt, ValueType::V128);
-                                    let val = completed_frame
-                                        .stack
-                                        .pop_u64()
-                                        .map_err(ExecError::ExecutionFault)?;
-                                    final_values.push(Value::from_raw(*rt, val));
-                                }
-                                _ => {
-                                    completed_frame
-                                        .scratch_values_raw
-                                        .resize(return_types.len(), 0);
-                                    for (i, rt) in return_types.iter().enumerate().rev() {
+                            } else {
+                                // No caller, this is the final result
+                                let final_values = self.result.get_or_insert_with(Vec::new);
+                                final_values.clear();
+                                match return_types.as_slice() {
+                                    [] => {}
+                                    [ValueType::Unit] => {}
+                                    [rt] => {
                                         debug_assert_ne!(*rt, ValueType::V128);
-                                        completed_frame.scratch_values_raw[i] = completed_frame
+                                        let val = completed_frame
                                             .stack
                                             .pop_u64()
                                             .map_err(ExecError::ExecutionFault)?;
+                                        final_values.push(Value::from_raw(*rt, val));
                                     }
-                                    for (i, rt) in return_types.iter().enumerate() {
-                                        debug_assert_ne!(*rt, ValueType::V128);
-                                        final_values.push(Value::from_raw(
-                                            *rt,
-                                            completed_frame.scratch_values_raw[i],
-                                        ));
+                                    _ => {
+                                        completed_frame
+                                            .scratch_values_raw
+                                            .resize(return_types.len(), 0);
+                                        for (i, rt) in return_types.iter().enumerate().rev() {
+                                            debug_assert_ne!(*rt, ValueType::V128);
+                                            completed_frame.scratch_values_raw[i] = completed_frame
+                                                .stack
+                                                .pop_u64()
+                                                .map_err(ExecError::ExecutionFault)?;
+                                        }
+                                        for (i, rt) in return_types.iter().enumerate() {
+                                            debug_assert_ne!(*rt, ValueType::V128);
+                                            final_values.push(Value::from_raw(
+                                                *rt,
+                                                completed_frame.scratch_values_raw[i],
+                                            ));
+                                        }
                                     }
                                 }
+                                self.recycle_frame(completed_frame);
+                                return Ok(RunResult::Complete);
                             }
                             self.recycle_frame(completed_frame);
-                            return Ok(RunResult::Complete);
+                            break; // Exit continuation loop to continue outer execution loop
                         }
-                        self.recycle_frame(completed_frame);
-                        break; // Exit continuation loop to continue outer execution loop
-                    }
-                    Continuation::Call(funcidx) => {
-                        // Function call - check if it's imported or local
-                        // SAFETY: `cached_module_ptr` points at `current_module_id` instance.
-                        let module_ptr = cached_module_ptr as *const Instance;
-                        let module = unsafe { &*module_ptr };
+                        Continuation::Call(funcidx) => {
+                            // Function call - check if it's imported or local
+                            // SAFETY: `cached_module_ptr` points at `current_module_id` instance.
+                            let module_ptr = cached_module_ptr as *const Instance;
+                            let module = unsafe { &*module_ptr };
 
-                        if module.num_imported_functions == 0 {
-                            // Common hot path: module has no imports, so all calls are local.
-                            let local_idx = funcidx as usize;
-                            if local_idx >= module.programs.len() {
-                                return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
-                            }
-                            let target_program_key =
-                                ProgramKey::local(module.owner_id, local_idx as u32);
-                            let recycled_frame =
-                                self.pop_recycled_frame_for_program_key(target_program_key);
-                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
-                            let module = unsafe { &*module_ptr };
-                            let frame = if let Some(mut frame) = recycled_frame {
-                                unsafe {
-                                    module.refill_frame_for_local_idx_from_stack_unchecked(
-                                        local_idx,
-                                        &mut current_frame.stack,
-                                        &mut frame,
-                                    )
+                            if module.num_imported_functions == 0 {
+                                // Common hot path: module has no imports, so all calls are local.
+                                let local_idx = funcidx as usize;
+                                if local_idx >= module.programs.len() {
+                                    return Err(ExecError::ExecutionFault(
+                                        Fault::GlobalIndexOutOfBounds,
+                                    ));
                                 }
-                                .map_err(ExecError::ExecutionFault)?;
-                                frame
-                            } else {
-                                unsafe {
-                                    module.frame_for_local_idx_from_stack_unchecked(
-                                        local_idx,
-                                        &mut current_frame.stack,
-                                    )
-                                }
-                                .map_err(ExecError::ExecutionFault)?
-                            };
-                            self.frame_stack.push((current_module_id, frame));
-                            // Fast path: directly execute callee without bouncing to outer loop.
-                            if BUDGETED && ticks_left == 0 {
-                                return Ok(RunResult::Paused);
-                            }
-                            continue 'execute_current;
-                        } else if funcidx < module.num_imported_functions {
-                            // This is an imported function - dispatch via continuation
-                            let imported_func = module
-                                .imported_functions
-                                .get(funcidx as usize)
-                                .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
-                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
-                            match imported_func {
-                                ImportedFunction::Host(host_func) => {
-                                    // Call host function directly
-                                    let result = host_func(&mut current_frame.stack)
-                                        .map_err(ExecError::ExecutionFault)?;
-                                    // Handle the result continuation
-                                    match result {
-                                        Continuation::ProgramEnd => {
-                                            // Host function completed, continue execution
-                                            break;
-                                        }
-                                        other => {
-                                            // Host function returned another continuation - handle it recursively
-                                            continuation = other;
-                                            continue;
-                                        }
+                                let target_program_key =
+                                    ProgramKey::local(module.owner_id, local_idx as u32);
+                                let recycled_frame =
+                                    self.pop_recycled_frame_for_program_key(target_program_key);
+                                let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                                let module = unsafe { &*module_ptr };
+                                let frame = if let Some(mut frame) = recycled_frame {
+                                    unsafe {
+                                        module.refill_frame_for_local_idx_from_stack_unchecked(
+                                            local_idx,
+                                            &mut current_frame.stack,
+                                            &mut frame,
+                                        )
                                     }
-                                }
-                                ImportedFunction::Module {
-                                    module_id,
-                                    func_idx,
-                                } => {
-                                    // Inter-module call
-                                    continuation = Continuation::CallExternal {
-                                        module_id: *module_id,
-                                        func_id: *func_idx,
-                                        expected_type: None,
-                                    };
-                                    continue;
-                                }
-                            }
-                        } else {
-                            // Local function call
-                            let target_program_key =
-                                Self::local_program_key(module, funcidx)
                                     .map_err(ExecError::ExecutionFault)?;
-                            let recycled_frame =
-                                self.pop_recycled_frame_for_program_key(target_program_key);
-                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
-                            let module = unsafe { &*module_ptr };
-                            // Create new frame for the called function
-                            let frame = if let Some(mut frame) = recycled_frame {
-                                module
-                                    .refill_frame_for_funcidx_from_stack(
-                                        funcidx,
-                                        &mut current_frame.stack,
-                                        &mut frame,
-                                    )
-                                    .map_err(ExecError::ExecutionFault)?;
-                                frame
-                            } else {
-                                module
-                                    .frame_for_funcidx_from_stack(funcidx, &mut current_frame.stack)
+                                    frame
+                                } else {
+                                    unsafe {
+                                        module.frame_for_local_idx_from_stack_unchecked(
+                                            local_idx,
+                                            &mut current_frame.stack,
+                                        )
+                                    }
                                     .map_err(ExecError::ExecutionFault)?
-                            };
-                            self.frame_stack.push((current_module_id, frame));
-                            // Fast path: directly execute callee without bouncing to outer loop.
-                            if BUDGETED && ticks_left == 0 {
-                                return Ok(RunResult::Paused);
-                            }
-                            continue 'execute_current;
-                        }
-                    }
-                    Continuation::CallExternal {
-                        module_id,
-                        func_id,
-                        expected_type,
-                    } => {
-                        // Inter-module call
-                        // This path may materialize detached modules, which can rehash `self.modules`.
-                        // Invalidate cached raw pointers before potential map mutation.
-                        cached_module_id = None;
-                        cached_module_ptr = std::ptr::null_mut();
-                        let target_module_key = self
-                            .ensure_runtime_module_available(module_id)
-                            .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
-                        let target_module = self
-                            .modules
-                            .get(&target_module_key)
-                            .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
-
-                        // Get function signature from the target module.
-                        let func_index = func_id as usize;
-                        if func_index >= target_module.function_type_mapping().len() {
-                            return Err(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds));
-                        }
-
-                        let type_idx = target_module.function_type_mapping()[func_index];
-                        let func_type = &target_module.module.types[type_idx];
-
-                        if let Some((source_module_id, expected_type_idx)) = expected_type {
-                            let source_module = self
-                                .modules
-                                .get(&source_module_id)
-                                .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
-                            let expected_type = source_module
-                                .module
-                                .types
-                                .get(expected_type_idx as usize)
-                                .ok_or(ExecError::ExecutionFault(Fault::UnresolvableTypeIndex(
-                                    expected_type_idx,
-                                )))?;
-                            if expected_type.params != func_type.params
-                                || expected_type.results != func_type.results
-                            {
-                                return Err(ExecError::ExecutionFault(
-                                    Fault::IndirectCallTypeMismatch,
-                                ));
-                            }
-                        }
-
-                        // If the target is imported, dispatch recursively without creating a frame.
-                        if func_id < target_module.num_imported_functions {
-                            let imported_func =
-                                target_module.imported_functions.get(func_id as usize).ok_or(
-                                    ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds),
-                                )?;
-                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
-                            match imported_func {
-                                ImportedFunction::Host(host_func) => {
-                                    let result = host_func(&mut current_frame.stack)
-                                        .map_err(ExecError::ExecutionFault)?;
-                                    match result {
-                                        Continuation::ProgramEnd => break,
-                                        other => {
-                                            continuation = other;
-                                            continue;
+                                };
+                                self.frame_stack.push((current_module_id, frame));
+                                // Fast path: directly execute callee without bouncing to outer loop.
+                                if BUDGETED && ticks_left == 0 {
+                                    return Ok(RunResult::Paused);
+                                }
+                                continue 'execute_current;
+                            } else if funcidx < module.num_imported_functions {
+                                // This is an imported function - dispatch via continuation
+                                let imported_func =
+                                    module.imported_functions.get(funcidx as usize).ok_or(
+                                        ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds),
+                                    )?;
+                                let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                                match imported_func {
+                                    ImportedFunction::Host(host_func) => {
+                                        // Call host function directly
+                                        let result = host_func(&mut current_frame.stack)
+                                            .map_err(ExecError::ExecutionFault)?;
+                                        // Handle the result continuation
+                                        match result {
+                                            Continuation::ProgramEnd => {
+                                                // Host function completed, continue execution
+                                                break;
+                                            }
+                                            other => {
+                                                // Host function returned another continuation - handle it recursively
+                                                continuation = other;
+                                                continue;
+                                            }
                                         }
                                     }
+                                    ImportedFunction::Module {
+                                        module_id,
+                                        func_idx,
+                                    } => {
+                                        // Inter-module call
+                                        continuation = Continuation::CallExternal {
+                                            module_id: *module_id,
+                                            func_id: *func_idx,
+                                            expected_type: None,
+                                        };
+                                        continue;
+                                    }
                                 }
-                                ImportedFunction::Module {
-                                    module_id,
-                                    func_idx,
-                                } => {
-                                    continuation = Continuation::CallExternal {
-                                        module_id: *module_id,
-                                        func_id: *func_idx,
-                                        expected_type: None,
-                                    };
-                                    continue;
+                            } else {
+                                // Local function call
+                                let target_program_key = Self::local_program_key(module, funcidx)
+                                    .map_err(ExecError::ExecutionFault)?;
+                                let recycled_frame =
+                                    self.pop_recycled_frame_for_program_key(target_program_key);
+                                let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                                let module = unsafe { &*module_ptr };
+                                // Create new frame for the called function
+                                let frame = if let Some(mut frame) = recycled_frame {
+                                    module
+                                        .refill_frame_for_funcidx_from_stack(
+                                            funcidx,
+                                            &mut current_frame.stack,
+                                            &mut frame,
+                                        )
+                                        .map_err(ExecError::ExecutionFault)?;
+                                    frame
+                                } else {
+                                    module
+                                        .frame_for_funcidx_from_stack(
+                                            funcidx,
+                                            &mut current_frame.stack,
+                                        )
+                                        .map_err(ExecError::ExecutionFault)?
+                                };
+                                self.frame_stack.push((current_module_id, frame));
+                                // Fast path: directly execute callee without bouncing to outer loop.
+                                if BUDGETED && ticks_left == 0 {
+                                    return Ok(RunResult::Paused);
                                 }
+                                continue 'execute_current;
                             }
-                        } else {
-                            // Create new frame in target module.
-                            let target_program_key =
-                                Self::local_program_key(target_module, func_id)
-                                .map_err(ExecError::ExecutionFault)?;
-                            let recycled_frame =
-                                self.pop_recycled_frame_for_program_key(target_program_key);
-                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                        }
+                        Continuation::CallExternal {
+                            module_id,
+                            func_id,
+                            expected_type,
+                        } => {
+                            // Inter-module call
+                            // This path may materialize detached modules, which can rehash `self.modules`.
+                            // Invalidate cached raw pointers before potential map mutation.
+                            cached_module_id = None;
+                            cached_module_ptr = std::ptr::null_mut();
+                            let target_module_key = self
+                                .ensure_runtime_module_available(module_id)
+                                .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
                             let target_module = self
                                 .modules
                                 .get(&target_module_key)
-                                .ok_or(ExecError::ExecutionFault(
+                                .ok_or(ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds))?;
+
+                            // Get function signature from the target module.
+                            let func_index = func_id as usize;
+                            if func_index >= target_module.function_type_mapping().len() {
+                                return Err(ExecError::ExecutionFault(
                                     Fault::GlobalIndexOutOfBounds,
-                                ))?;
-                            let frame = if let Some(mut frame) = recycled_frame {
-                                target_module
-                                    .refill_frame_for_funcidx_from_stack(
-                                        func_id,
-                                        &mut current_frame.stack,
-                                        &mut frame,
-                                    )
-                                    .map_err(ExecError::ExecutionFault)?;
-                                frame
-                            } else {
-                                target_module
-                                    .frame_for_funcidx_from_stack(func_id, &mut current_frame.stack)
-                                    .map_err(ExecError::ExecutionFault)?
-                            };
-                            self.frame_stack.push((target_module_key, frame));
-                            break; // Exit continuation loop to continue outer execution loop
-                        }
-                    }
-                    Continuation::CallHost(host_func) => {
-                        // Handle host function call
-                        let (_, current_frame) = self.frame_stack.last_mut().unwrap();
-
-                        // Call the host function with the current stack
-                        let result = host_func(&mut current_frame.stack)
-                            .map_err(ExecError::ExecutionFault)?;
-
-                        // Host functions typically return ProgramEnd, but we should handle other continuations
-                        match result {
-                            Continuation::ProgramEnd => {
-                                // Host function completed, continue execution
-                                break;
+                                ));
                             }
-                            other => {
-                                // Host function returned a different continuation - handle recursively
-                                continuation = other;
-                                continue;
+
+                            let type_idx = target_module.function_type_mapping()[func_index];
+                            let func_type = &target_module.module.types[type_idx];
+
+                            if let Some((source_module_id, expected_type_idx)) = expected_type {
+                                let source_module = self.modules.get(&source_module_id).ok_or(
+                                    ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds),
+                                )?;
+                                let expected_type = source_module
+                                    .module
+                                    .types
+                                    .get(expected_type_idx as usize)
+                                    .ok_or(ExecError::ExecutionFault(
+                                        Fault::UnresolvableTypeIndex(expected_type_idx),
+                                    ))?;
+                                if expected_type.params != func_type.params
+                                    || expected_type.results != func_type.results
+                                {
+                                    return Err(ExecError::ExecutionFault(
+                                        Fault::IndirectCallTypeMismatch,
+                                    ));
+                                }
+                            }
+
+                            // If the target is imported, dispatch recursively without creating a frame.
+                            if func_id < target_module.num_imported_functions {
+                                let imported_func = target_module
+                                    .imported_functions
+                                    .get(func_id as usize)
+                                    .ok_or(ExecError::ExecutionFault(
+                                        Fault::GlobalIndexOutOfBounds,
+                                    ))?;
+                                let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                                match imported_func {
+                                    ImportedFunction::Host(host_func) => {
+                                        let result = host_func(&mut current_frame.stack)
+                                            .map_err(ExecError::ExecutionFault)?;
+                                        match result {
+                                            Continuation::ProgramEnd => break,
+                                            other => {
+                                                continuation = other;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    ImportedFunction::Module {
+                                        module_id,
+                                        func_idx,
+                                    } => {
+                                        continuation = Continuation::CallExternal {
+                                            module_id: *module_id,
+                                            func_id: *func_idx,
+                                            expected_type: None,
+                                        };
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                // Create new frame in target module.
+                                let target_program_key =
+                                    Self::local_program_key(target_module, func_id)
+                                        .map_err(ExecError::ExecutionFault)?;
+                                let recycled_frame =
+                                    self.pop_recycled_frame_for_program_key(target_program_key);
+                                let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+                                let target_module = self.modules.get(&target_module_key).ok_or(
+                                    ExecError::ExecutionFault(Fault::GlobalIndexOutOfBounds),
+                                )?;
+                                let frame = if let Some(mut frame) = recycled_frame {
+                                    target_module
+                                        .refill_frame_for_funcidx_from_stack(
+                                            func_id,
+                                            &mut current_frame.stack,
+                                            &mut frame,
+                                        )
+                                        .map_err(ExecError::ExecutionFault)?;
+                                    frame
+                                } else {
+                                    target_module
+                                        .frame_for_funcidx_from_stack(
+                                            func_id,
+                                            &mut current_frame.stack,
+                                        )
+                                        .map_err(ExecError::ExecutionFault)?
+                                };
+                                self.frame_stack.push((target_module_key, frame));
+                                break; // Exit continuation loop to continue outer execution loop
+                            }
+                        }
+                        Continuation::CallHost(host_func) => {
+                            // Handle host function call
+                            let (_, current_frame) = self.frame_stack.last_mut().unwrap();
+
+                            // Call the host function with the current stack
+                            let result = host_func(&mut current_frame.stack)
+                                .map_err(ExecError::ExecutionFault)?;
+
+                            // Host functions typically return ProgramEnd, but we should handle other continuations
+                            match result {
+                                Continuation::ProgramEnd => {
+                                    // Host function completed, continue execution
+                                    break;
+                                }
+                                other => {
+                                    // Host function returned a different continuation - handle recursively
+                                    continuation = other;
+                                    continue;
+                                }
                             }
                         }
                     }
                 }
-            }
                 break 'execute_current;
             }
         }
     }
 
     #[inline(always)]
-    fn run_with_tick_budget(&mut self, remaining_ticks: Option<usize>) -> Result<RunResult, ExecError> {
+    fn run_with_tick_budget(
+        &mut self,
+        remaining_ticks: Option<usize>,
+    ) -> Result<RunResult, ExecError> {
         match remaining_ticks {
             Some(ticks) => self.run_core::<true>(ticks),
             None => self.run_core::<false>(0),

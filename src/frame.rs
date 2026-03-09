@@ -120,7 +120,11 @@ impl Frame {
         Self::for_owned_program(vec![0; num_locals], program)
     }
 
-    pub fn for_borrowed_program(locals: Vec<u64>, program_key: ProgramKey, program: &Rc<Program>) -> Self {
+    pub fn for_borrowed_program(
+        locals: Vec<u64>,
+        program_key: ProgramKey,
+        program: &Rc<Program>,
+    ) -> Self {
         Frame {
             locals,
             program_key,
@@ -253,7 +257,10 @@ impl Frame {
     }
 
     #[inline(always)]
-    pub fn call_indirect_cache_entry_mut(&mut self, call_site_pc: usize) -> &mut CallIndirectCacheEntry {
+    pub fn call_indirect_cache_entry_mut(
+        &mut self,
+        call_site_pc: usize,
+    ) -> &mut CallIndirectCacheEntry {
         if call_site_pc >= self.call_indirect_cache.len() {
             self.call_indirect_cache
                 .resize(call_site_pc + 1, CallIndirectCacheEntry::invalid());
@@ -275,13 +282,19 @@ impl Frame {
             .primary
             .matches(table_idx, elem_idx, expected_type_idx, table_generation)
         {
-            return Some((cache.primary.target_module_id, cache.primary.target_func_idx));
+            return Some((
+                cache.primary.target_module_id,
+                cache.primary.target_func_idx,
+            ));
         }
         if cache
             .secondary
             .matches(table_idx, elem_idx, expected_type_idx, table_generation)
         {
-            return Some((cache.secondary.target_module_id, cache.secondary.target_func_idx));
+            return Some((
+                cache.secondary.target_module_id,
+                cache.secondary.target_func_idx,
+            ));
         }
         None
     }

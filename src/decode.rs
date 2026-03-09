@@ -1015,12 +1015,8 @@ fn peephole_optimize_ops(ops: &[Op]) -> Vec<Op> {
 
     while i < ops.len() {
         if i + 4 <= ops.len() {
-            if let [
-                Op::GetLocal(lhs),
-                Op::GetLocal(rhs),
-                Op::I32GeU,
-                Op::BrIf(depth),
-            ] = &ops[i..i + 4]
+            if let [Op::GetLocal(lhs), Op::GetLocal(rhs), Op::I32GeU, Op::BrIf(depth)] =
+                &ops[i..i + 4]
             {
                 optimized.push(Op::BrIfLocalI32GeU(*lhs, *rhs, *depth));
                 i += 4;
@@ -1037,12 +1033,8 @@ fn peephole_optimize_ops(ops: &[Op]) -> Vec<Op> {
         }
 
         if i + 4 <= ops.len() {
-            if let [
-                Op::GetLocal(a),
-                Op::GetLocal(b),
-                Op::I64Add,
-                Op::SetLocal(dst),
-            ] = &ops[i..i + 4]
+            if let [Op::GetLocal(a), Op::GetLocal(b), Op::I64Add, Op::SetLocal(dst)] =
+                &ops[i..i + 4]
             {
                 optimized.push(Op::I64LocalAddSet(*a, *b, *dst));
                 i += 4;
@@ -1051,12 +1043,8 @@ fn peephole_optimize_ops(ops: &[Op]) -> Vec<Op> {
         }
 
         if i + 4 <= ops.len() {
-            if let [
-                Op::GetLocal(src),
-                Op::I64Const(c),
-                Op::I64Sub,
-                Op::SetLocal(dst),
-            ] = &ops[i..i + 4]
+            if let [Op::GetLocal(src), Op::I64Const(c), Op::I64Sub, Op::SetLocal(dst)] =
+                &ops[i..i + 4]
             {
                 optimized.push(Op::I64LocalSubConstSet(*src, *c, *dst));
                 i += 4;
@@ -1065,14 +1053,8 @@ fn peephole_optimize_ops(ops: &[Op]) -> Vec<Op> {
         }
 
         if i + 6 <= ops.len() {
-            if let [
-                Op::GetLocal(src),
-                Op::I32Const(mul),
-                Op::I32Mul,
-                Op::I32Const(add),
-                Op::I32Add,
-                Op::SetLocal(dst),
-            ] = &ops[i..i + 6]
+            if let [Op::GetLocal(src), Op::I32Const(mul), Op::I32Mul, Op::I32Const(add), Op::I32Add, Op::SetLocal(dst)] =
+                &ops[i..i + 6]
             {
                 optimized.push(Op::I32LocalMulAddConstSet(*src, *mul, *add, *dst));
                 i += 6;
@@ -1081,13 +1063,8 @@ fn peephole_optimize_ops(ops: &[Op]) -> Vec<Op> {
         }
 
         if i + 5 <= ops.len() {
-            if let [
-                Op::GetLocal(src),
-                Op::I32Const(mul),
-                Op::I32Mul,
-                Op::I32Const(add),
-                Op::I32Add,
-            ] = &ops[i..i + 5]
+            if let [Op::GetLocal(src), Op::I32Const(mul), Op::I32Mul, Op::I32Const(add), Op::I32Add] =
+                &ops[i..i + 5]
             {
                 optimized.push(Op::I32LocalMulAddConst(*src, *mul, *add));
                 i += 5;
@@ -1096,12 +1073,8 @@ fn peephole_optimize_ops(ops: &[Op]) -> Vec<Op> {
         }
 
         if i + 4 <= ops.len() {
-            if let [
-                Op::GetLocal(src),
-                Op::I32Const(add),
-                Op::I32Add,
-                Op::SetLocal(dst),
-            ] = &ops[i..i + 4]
+            if let [Op::GetLocal(src), Op::I32Const(add), Op::I32Add, Op::SetLocal(dst)] =
+                &ops[i..i + 4]
             {
                 optimized.push(Op::I32LocalAddConstSet(*src, *add, *dst));
                 i += 4;
